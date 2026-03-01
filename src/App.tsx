@@ -76,7 +76,7 @@ export default function App() {
           isGet = init.method.toUpperCase() === 'GET';
         }
 
-        if (isGet) {
+        if (isGet && 'caches' in window) {
           try {
             const cache = await caches.open('paddlejs-models-v1');
             const cachedResponse = await cache.match(reqStrOrObj as RequestInfo);
@@ -94,7 +94,7 @@ export default function App() {
 
         const responseClone = response.clone();
         
-        if (isGet && response.ok) {
+        if (isGet && response.ok && 'caches' in window) {
            const responseToCache = response.clone();
            caches.open('paddlejs-models-v1')
              .then(cache => cache.put(reqStrOrObj as RequestInfo, responseToCache))
@@ -284,6 +284,12 @@ export default function App() {
         )}
 
       </main>
+
+      <footer className="footer-copyright">
+        <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
+          © {new Date().getFullYear()} nubol23
+        </a>
+      </footer>
     </div>
   );
 }

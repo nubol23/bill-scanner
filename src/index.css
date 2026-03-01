@@ -215,3 +215,20 @@ body {
     font-size: 1.875rem;
   }
 }
+
+.footer-copyright {
+  text-align: center;
+  padding: 1rem 0;
+  margin-top: auto;
+}
+
+.footer-copyright a {
+  color: #9ca3af;
+  font-size: 0.875rem;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.footer-copyright a:hover {
+  color: #6b7280;
+}
