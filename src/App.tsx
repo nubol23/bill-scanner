@@ -163,7 +163,46 @@ export default function App() {
     img.src = url;
     img.onload = async () => {
       try {
-        const res = await ocr.recognize(img);
+        const getOptimizedImage = (): Promise<HTMLImageElement> => {
+          return new Promise((resolve) => {
+            const MAX_DIMENSION = 1280;
+            let width = img.width;
+            let height = img.height;
+
+            if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+              if (width > height) {
+                height = Math.round((height * MAX_DIMENSION) / width);
+                width = MAX_DIMENSION;
+              } else {
+                width = Math.round((width * MAX_DIMENSION) / height);
+                height = MAX_DIMENSION;
+              }
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            
+            if (!ctx) {
+              resolve(img);
+              return;
+            }
+
+            ctx.filter = 'grayscale(100%)';
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+            const optimizedImg = new Image();
+            optimizedImg.onload = () => resolve(optimizedImg);
+            optimizedImg.onerror = () => resolve(img);
+            optimizedImg.src = optimizedDataUrl;
+          });
+        };
+
+        const imageForOcr = await getOptimizedImage();
+        const res = await ocr.recognize(imageForOcr);
+        
         if (res && res.text) {
           setRecognizedTexts(res.text);
           checkNumbers(res.text);
