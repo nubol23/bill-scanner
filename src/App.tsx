@@ -217,7 +217,7 @@ export default function App() {
         {isInitializing ? (
           <div className="status-box initializing">
             <Loader2 className="spinner" size={32} />
-            <p>Descargando Modelo de IA<br/><small>(puede tardar un momento)</small></p>
+            <p>Descargando Modelo de IA<br/><small>(puede tardar unos minutos la primera vez)</small></p>
             <div className="progress-bar-container">
               <div className="progress-bar" style={{ width: `${loadProgress}%` }}></div>
             </div>
