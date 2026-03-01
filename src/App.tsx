@@ -228,7 +228,6 @@ export default function App() {
             <input 
               type="file" 
               accept="image/*" 
-              capture="environment"
               onChange={handleFileChange} 
               ref={fileInputRef}
               className="hidden-input"
