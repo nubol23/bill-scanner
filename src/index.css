@@ -4,10 +4,10 @@
   --bg-color: #f9fafb;
   --card-bg: #ffffff;
   --border: #e5e7eb;
-  --primary: #4b5563; /* Tailwind gray-600 */
-  --primary-hover: #374151; /* Tailwind gray-700 */
-  --text-main: #111827; /* Tailwind gray-900 */
-  --text-muted: #6b7280; /* Tailwind gray-500 */
+  --primary: #4b5563;
+  --primary-hover: #374151;
+  --text-main: #111827;
+  --text-muted: #6b7280;
   --success: #10b981;
   --error: #ef4444;
 }
@@ -65,13 +65,12 @@ body {
   align-items: center;
 }
 
-/* Base card styles */
 .status-box,
 .result-card,
 .preview-card {
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 0.5rem; /* 8px rounded corners */
+  border-radius: 0.5rem;
   padding: 1.5rem;
   width: 100%;
   text-align: center;
@@ -125,7 +124,7 @@ body {
   background: var(--primary);
   color: white;
   border: none;
-  border-radius: 0.5rem; /* 8px */
+  border-radius: 0.5rem;
   padding: 0.625rem 1.25rem;
   font-size: 0.95rem;
   font-weight: 500;
@@ -205,14 +204,12 @@ body {
   margin-bottom: 0.25rem;
 }
 
-/* Animations */
 @keyframes spin {
   100% {
     transform: rotate(360deg);
   }
 }
 
-/* Responsive */
 @media (max-width: 480px) {
   .glass-header h1 {
     font-size: 1.875rem;

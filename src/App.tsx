@@ -61,7 +61,6 @@ export default function App() {
     async function initOcr() {
       const originalFetch = window.fetch;
       
-      // We expect around ~3.5MB of WebGL model weights/manifests to be downloaded
       const ESTIMATED_TOTAL_BYTES = 3500000; 
       let loadedBytes = 0;
 
@@ -77,7 +76,6 @@ export default function App() {
           isGet = init.method.toUpperCase() === 'GET';
         }
 
-        // 1. Try to return from cache first for GET requests
         if (isGet) {
           try {
             const cache = await caches.open('paddlejs-models-v1');
@@ -92,13 +90,10 @@ export default function App() {
 
         const response = await originalFetch(...args);
         
-        // If there's no body, just return the response
         if (!response.body) return response;
 
-        // Clone the response for streaming/progress
         const responseClone = response.clone();
         
-        // 2. Save to cache in the background if it's a successful GET
         if (isGet && response.ok) {
            const responseToCache = response.clone();
            caches.open('paddlejs-models-v1')
@@ -106,20 +101,20 @@ export default function App() {
              .catch(e => console.warn("Error saving to cache:", e));
         }
 
-        // Try to get content length from headers, fallback to estimating if missing
         const reader = responseClone.body!.getReader();
 
-        // Create a new stream that we can use to monitor the chunks
         const stream = new ReadableStream({
           async start(controller) {
-            // eslint-disable-next-line no-constant-condition
-            while (true) {
+            let doneReading = false;
+            while (!doneReading) {
               const { done, value } = await reader.read();
-              if (done) break;
+              if (done) {
+                doneReading = true;
+                break;
+              }
               
               if (value) {
                  loadedBytes += value.byteLength;
-                 // Prevent progress from exceeding 99% until fully done.
                  const progress = Math.min(99, Math.round((loadedBytes / ESTIMATED_TOTAL_BYTES) * 100));
                  setLoadProgress(progress);
               }
@@ -129,7 +124,6 @@ export default function App() {
           }
         });
 
-        // Return a new response with our monitored stream
         return new Response(stream, {
           headers: response.headers,
           status: response.status,
@@ -144,7 +138,6 @@ export default function App() {
       } catch (error) {
         console.error("Error al inicializar OCR:", error);
       } finally {
-        // Always restore the original fetch
         window.fetch = originalFetch;
       }
     }
@@ -166,7 +159,6 @@ export default function App() {
     if (!url) return;
     setIsProcessing(true);
     
-    // Create an image element to pass to paddle.js
     const img = new Image();
     img.src = url;
     img.onload = async () => {
@@ -189,7 +181,6 @@ export default function App() {
 
   const checkNumbers = (texts: string[]) => {
     const allText = texts.join(" ");
-    // Match 8 to 9 digits potentially separated by spaces
     const rawMatches = allText.match(/(?:\d\s*){8,9}/g);
     
     if (!rawMatches) {
@@ -197,11 +188,9 @@ export default function App() {
         return;
     }
 
-    // Deduplicate the extracted strings
     const uniqueMatches = [...new Set(rawMatches.map(m => m.replace(/\s+/g, '')))];
     const newResults: { isValid: boolean; parsed: number }[] = [];
 
-    // Check all extracted unique numbers
     for (const match of uniqueMatches) {
       const num = parseInt(match, 10);
       let isInvalid = false;
