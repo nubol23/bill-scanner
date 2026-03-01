@@ -48,7 +48,7 @@ export default function App() {
   const [loadProgress, setLoadProgress] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [result, setResult] = useState<{ isValid: boolean; parsed: number } | null>(null);
+  const [results, setResults] = useState<{ isValid: boolean; parsed: number }[] | null>(null);
   const [recognizedTexts, setRecognizedTexts] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -156,7 +156,7 @@ export default function App() {
     if (file) {
       const url = URL.createObjectURL(file);
       setImageSrc(url);
-      setResult(null);
+      setResults(null);
       setRecognizedTexts([]);
       processImage(url);
     }
@@ -177,7 +177,7 @@ export default function App() {
           checkNumbers(res.text);
         } else {
           setRecognizedTexts([]);
-          setResult(null);
+          setResults(null);
         }
       } catch (err) {
         console.error("Error de OCR:", err);
@@ -193,14 +193,16 @@ export default function App() {
     const rawMatches = allText.match(/(?:\d\s*){8,9}/g);
     
     if (!rawMatches) {
-        setResult(null);
+        setResults([]);
         return;
     }
 
-    const matches = rawMatches.map(m => m.replace(/\s+/g, ''));
+    // Deduplicate the extracted strings
+    const uniqueMatches = [...new Set(rawMatches.map(m => m.replace(/\s+/g, '')))];
+    const newResults: { isValid: boolean; parsed: number }[] = [];
 
-    // Check all extracted numbers
-    for (const match of matches) {
+    // Check all extracted unique numbers
+    for (const match of uniqueMatches) {
       const num = parseInt(match, 10);
       let isInvalid = false;
       for (const [min, max] of validRanges) {
@@ -209,14 +211,10 @@ export default function App() {
           break;
         }
       }
-      if (isInvalid) {
-        setResult({ isValid: false, parsed: num });
-        return; // Found a stolen/invalid one, stop searching
-      }
+      newResults.push({ isValid: !isInvalid, parsed: num });
     }
     
-    // If we reach here, we found numbers and NONE of them were in the invalid ranges
-    setResult({ isValid: true, parsed: parseInt(matches[0], 10) });
+    setResults(newResults);
   };
 
   return (
@@ -266,25 +264,29 @@ export default function App() {
           </div>
         )}
 
-        {!isProcessing && result !== null && (
-          <div className={`result-card ${result.isValid ? "valid" : "invalid"}`}>
-            {result.isValid ? (
-              <>
-                <CheckCircle2 size={48} className="icon-valid" />
-                <h2>Billete Válido</h2>
-                <p>El número {result.parsed} es válido y no pertenece a los rangos reportados.</p>
-              </>
-            ) : (
-              <>
-                <XCircle size={48} className="icon-invalid" />
-                <h2>Billete Inválido</h2>
-                <p>¡Cuidado! El número {result.parsed} pertenece a un lote reportado falso o robado.</p>
-              </>
-            )}
+        {!isProcessing && results !== null && results.length > 0 && (
+          <div className="results-container" style={{ display: 'flex', flexDirection: 'column', gap: '1rem', width: '100%' }}>
+            {results.map((result, index) => (
+              <div key={index} className={`result-card ${result.isValid ? "valid" : "invalid"}`}>
+                {result.isValid ? (
+                  <>
+                    <CheckCircle2 size={48} className="icon-valid" />
+                    <h2>Billete Válido</h2>
+                    <p>El número {result.parsed} es válido y no pertenece a los rangos reportados.</p>
+                  </>
+                ) : (
+                  <>
+                    <XCircle size={48} className="icon-invalid" />
+                    <h2>Billete Inválido</h2>
+                    <p>¡Cuidado! El número {result.parsed} pertenece a un lote reportado falso o robado.</p>
+                  </>
+                )}
+              </div>
+            ))}
           </div>
         )}
 
-        {!isProcessing && result === null && recognizedTexts.length > 0 && (
+        {!isProcessing && results !== null && results.length === 0 && recognizedTexts.length > 0 && (
            <div className="result-card invalid">
               <XCircle size={48} className="icon-invalid" />
               <h2>Patrón no encontrado</h2>
