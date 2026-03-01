@@ -198,6 +198,72 @@ function getSourcePriority(source: CandidateSource) {
   }
 }
 
+function isSubsequence(shorter: string, longer: string) {
+  let shorterIndex = 0;
+
+  for (const char of longer) {
+    if (char === shorter[shorterIndex]) {
+      shorterIndex += 1;
+      if (shorterIndex === shorter.length) {
+        return true;
+      }
+    }
+  }
+
+  return shorterIndex === shorter.length;
+}
+
+function getCandidateStrength(candidate: SerialCandidate) {
+  return (
+    candidate.confidence +
+    candidate.serialDisplay.length * 6 +
+    getSourcePriority(candidate.source) * 5
+  );
+}
+
+function areSubsetDuplicateSerials(left: string, right: string) {
+  if (left === right || left.length === right.length) {
+    return false;
+  }
+
+  const [shorter, longer] =
+    left.length < right.length ? [left, right] : [right, left];
+
+  if (shorter.length < 7) {
+    return false;
+  }
+
+  return longer.includes(shorter) || isSubsequence(shorter, longer);
+}
+
+function compareNearDuplicatePreference(current: SerialCandidate, existing: SerialCandidate) {
+  if (!areSubsetDuplicateSerials(current.serialDisplay, existing.serialDisplay)) {
+    return 0;
+  }
+
+  const [shorter, longer] =
+    current.serialDisplay.length < existing.serialDisplay.length
+      ? [current, existing]
+      : [existing, current];
+
+  if (getCandidateStrength(longer) >= getCandidateStrength(shorter) - 12) {
+    return current === longer ? 1 : -1;
+  }
+
+  const currentStrength = getCandidateStrength(current);
+  const existingStrength = getCandidateStrength(existing);
+
+  if (currentStrength !== existingStrength) {
+    return currentStrength > existingStrength ? 1 : -1;
+  }
+
+  if (current.serialDisplay.length !== existing.serialDisplay.length) {
+    return current.serialDisplay.length > existing.serialDisplay.length ? 1 : -1;
+  }
+
+  return getSourcePriority(current.source) - getSourcePriority(existing.source);
+}
+
 function hasGeometry(segment: OcrSegment) {
   return segment.pointBox !== null && segment.boxWidth > 0 && segment.boxHeight > 0;
 }
@@ -556,6 +622,28 @@ function extractSerialCandidates(tokens: string[], rawPoints: unknown) {
 
   for (const candidate of sortedCandidates) {
     if (candidate.confidence < 55 || seenSerials.has(candidate.serialDisplay)) {
+      continue;
+    }
+
+    let shouldSkip = false;
+
+    for (let index = selected.length - 1; index >= 0; index -= 1) {
+      const existing = selected[index];
+      const preference = compareNearDuplicatePreference(candidate, existing);
+
+      if (preference < 0) {
+        shouldSkip = true;
+        break;
+      }
+
+      if (preference > 0) {
+        seenSerials.delete(existing.serialDisplay);
+        existing.segmentIndexes.forEach((segmentIndex) => usedSegments.delete(segmentIndex));
+        selected.splice(index, 1);
+      }
+    }
+
+    if (shouldSkip) {
       continue;
     }
 
@@ -927,8 +1015,8 @@ export default function App() {
                     <h2>Billete Válido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
                     <p>
-                      El número {result.serialDisplay} es válido y no pertenece a los rangos
-                      reportados.
+                      El número {result.serialDisplay} no pertenece a los rangos
+                      reportados por el BCB.
                     </p>
                   </>
                 ) : (
@@ -937,8 +1025,8 @@ export default function App() {
                     <h2>Billete Inválido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
                     <p>
-                      ¡Cuidado! El número {result.serialDisplay} pertenece a un lote reportado falso
-                      o robado.
+                      ¡Cuidado! El número {result.serialDisplay} pertenece a un lote reportado robado
+                      por el BCB.
                     </p>
                   </>
                 )}
