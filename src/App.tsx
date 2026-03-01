@@ -8,6 +8,7 @@ const RECOGNITION_MODEL_PATH =
   '/models/paddle-ocr/v1/ch_PP-OCRv2_rec_fuse_activation/model.json';
 const DEFAULT_MAX_DIMENSION = 1280;
 const COMPACT_MAX_DIMENSION = 960;
+const MOBILE_MAX_VIEWPORT_WIDTH = 768;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
 const FALLBACK_FILTER = 'grayscale(100%) contrast(1.18) brightness(1.05)';
 const DENOMINATION_VALUES = ['200', '100', '50', '20', '10'] as const;
@@ -271,6 +272,15 @@ function hasGeometry(segment: OcrSegment) {
 function isMemoryConstrainedDevice() {
   const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
   return typeof deviceMemory === 'number' && deviceMemory <= 2;
+}
+
+function isLikelyMobileDevice() {
+  const hasCoarsePointer =
+    typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+  const hasTouch = navigator.maxTouchPoints > 0;
+  const hasNarrowViewport = window.innerWidth <= MOBILE_MAX_VIEWPORT_WIDTH;
+
+  return hasCoarsePointer || (hasTouch && hasNarrowViewport);
 }
 
 function looksLikeMemoryError(error: unknown) {
@@ -834,18 +844,20 @@ export default function App() {
     return primaryPass;
   };
 
-  const processSelectedFile = async (previewUrl: string) => {
+  const processSelectedFile = async (file: File) => {
     const jobId = ++activeJobRef.current;
+    const sourceUrl = URL.createObjectURL(file);
+    let sourceImage: HTMLImageElement | null = null;
     setIsProcessing(true);
 
     try {
-      const sourceImage = await loadImageFromUrl(previewUrl);
+      sourceImage = await loadImageFromUrl(sourceUrl);
       if (activeJobRef.current !== jobId) {
         return;
       }
 
       const initialMaxDimension =
-        compactImageModeRef.current || isMemoryConstrainedDevice()
+        compactImageModeRef.current || isMemoryConstrainedDevice() || isLikelyMobileDevice()
           ? COMPACT_MAX_DIMENSION
           : DEFAULT_MAX_DIMENSION;
 
@@ -876,6 +888,11 @@ export default function App() {
       setRecognizedTexts([]);
       setResults(null);
     } finally {
+      URL.revokeObjectURL(sourceUrl);
+      if (sourceImage) {
+        sourceImage.src = '';
+      }
+
       if (activeJobRef.current === jobId) {
         setIsProcessing(false);
       }
@@ -927,7 +944,7 @@ export default function App() {
     const file = event.target.files?.[0];
     event.target.value = '';
 
-    if (!file) {
+    if (!file || isProcessing) {
       return;
     }
 
@@ -941,7 +958,7 @@ export default function App() {
     setResults(null);
     setRecognizedTexts([]);
 
-    void processSelectedFile(previewUrl);
+    void processSelectedFile(file);
   };
 
   return (
@@ -978,11 +995,17 @@ export default function App() {
             <input
               type="file"
               accept="image/*"
+              disabled={isProcessing}
               onChange={handleFileChange}
               ref={fileInputRef}
               className="hidden-input"
             />
-            <button className="primary-btn" onClick={() => fileInputRef.current?.click()}>
+            <button
+              type="button"
+              className="primary-btn"
+              disabled={isProcessing}
+              onClick={() => fileInputRef.current?.click()}
+            >
               <Camera size={24} />
               <span>Capturar / Subir Billete</span>
             </button>
@@ -991,7 +1014,7 @@ export default function App() {
 
         {imageSrc && (
           <div className="preview-card">
-            <img src={imageSrc} alt="Billete escaneado" className="scanned-image" />
+            <img key={imageSrc} src={imageSrc} alt="Billete escaneado" className="scanned-image" />
 
             {isProcessing && (
               <div className="processing-overlay">
