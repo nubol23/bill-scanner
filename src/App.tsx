@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import * as ocr from '@paddlejs-models/ocr';
 import { Camera, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 
 const DETECTION_MODEL_PATH =
@@ -56,7 +57,7 @@ const validRanges = [
   [109400001, 109850000],
 ];
 
-type OcrStatus = 'idle' | 'initializing' | 'ready' | 'error';
+type OcrStatus = 'initializing' | 'ready' | 'error';
 type CandidateSource = 'single-token' | 'adjacent-join' | 'fallback';
 type OcrPoint = [number, number];
 type OcrBox = [OcrPoint, OcrPoint, OcrPoint, OcrPoint];
@@ -64,11 +65,6 @@ type OcrBox = [OcrPoint, OcrPoint, OcrPoint, OcrPoint];
 type OcrResponse = {
   text?: unknown;
   points?: unknown;
-};
-
-type OcrModule = {
-  init: (detectionModelPath?: string, recognitionModelPath?: string) => Promise<unknown>;
-  recognize: (source: OcrCompatibleCanvas) => Promise<OcrResponse | null>;
 };
 
 type SerialCandidate = {
@@ -136,21 +132,6 @@ class OcrTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`El OCR tardó demasiado en responder (${timeoutMs} ms).`);
     this.name = 'OcrTimeoutError';
-  }
-}
-
-let ocrModulePromise: Promise<OcrModule> | null = null;
-
-async function loadOcrModule() {
-  if (!ocrModulePromise) {
-    ocrModulePromise = import('@paddlejs-models/ocr') as Promise<OcrModule>;
-  }
-
-  try {
-    return await ocrModulePromise;
-  } catch (error) {
-    ocrModulePromise = null;
-    throw error;
   }
 }
 
@@ -858,7 +839,7 @@ function createPreparedCanvasVariant(
 }
 
 export default function App() {
-  const [ocrStatus, setOcrStatus] = useState<OcrStatus>('idle');
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus>('initializing');
   const [ocrInitError, setOcrInitError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
@@ -866,11 +847,9 @@ export default function App() {
   const [scanFeedback, setScanFeedback] = useState<ScanFeedback>('none');
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
-  const [isPreparingOcr, setIsPreparingOcr] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const ocrModuleRef = useRef<OcrModule | null>(null);
-  const ocrInitPromiseRef = useRef<Promise<void> | null>(null);
+  const isOcrInitialized = useRef(false);
   const activeJobRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
   const compactImageModeRef = useRef(false);
@@ -913,67 +892,11 @@ export default function App() {
     setIsStartingCamera(false);
   };
 
-  const ensureOcrReady = async () => {
-    if (ocrModuleRef.current) {
-      if (ocrStatus !== 'ready') {
-        setOcrStatus('ready');
-      }
-      return ocrModuleRef.current;
-    }
-
-    if (ocrInitPromiseRef.current) {
-      await ocrInitPromiseRef.current;
-      if (!ocrModuleRef.current) {
-        throw new Error('OCR no disponible.');
-      }
-      return ocrModuleRef.current;
-    }
-
-    setIsPreparingOcr(true);
-    setOcrStatus('initializing');
-    setOcrInitError(null);
-
-    const initPromise = (async () => {
-      const ocrModule = await loadOcrModule();
-      await ocrModule.init(DETECTION_MODEL_PATH, RECOGNITION_MODEL_PATH);
-      ocrModuleRef.current = ocrModule;
-      setOcrStatus('ready');
-    })();
-
-    ocrInitPromiseRef.current = initPromise;
-
-    try {
-      await initPromise;
-      if (!ocrModuleRef.current) {
-        throw new Error('OCR no disponible.');
-      }
-
-      return ocrModuleRef.current;
-    } catch (error) {
-      console.error('Error al inicializar OCR:', error);
-      ocrModuleRef.current = null;
-      setOcrStatus('error');
-      setOcrInitError(
-        error instanceof Error
-          ? error.message
-          : 'No se pudo inicializar el motor OCR en este dispositivo.',
-      );
-      throw error;
-    } finally {
-      if (ocrInitPromiseRef.current === initPromise) {
-        ocrInitPromiseRef.current = null;
-      }
-
-      setIsPreparingOcr(false);
-    }
-  };
-
   const runRecognitionPass = async (
     sourceCanvas: OcrCompatibleCanvas,
   ): Promise<RecognitionPassResult> => {
-    const ocrModule = ocrModuleRef.current ?? (await ensureOcrReady());
     const response = await withTimeout(
-      async () => (await ocrModule.recognize(sourceCanvas)) as OcrResponse | null,
+      async () => (await ocr.recognize(sourceCanvas)) as OcrResponse | null,
       OCR_RECOGNITION_TIMEOUT_MS,
     );
     const tokens = Array.isArray(response?.text)
@@ -1099,11 +1022,6 @@ export default function App() {
     if (streamRef.current) {
       setCameraError(null);
       setIsCameraActive(true);
-      if (ocrStatus !== 'ready') {
-        void ensureOcrReady().catch(() => {
-          setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-        });
-      }
       return;
     }
 
@@ -1127,9 +1045,6 @@ export default function App() {
 
       streamRef.current = stream;
       setIsCameraActive(true);
-      void ensureOcrReady().catch(() => {
-        setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-      });
     } catch (error) {
       console.error('Error al abrir la cámara:', error);
       setCameraError('No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.');
@@ -1140,22 +1055,6 @@ export default function App() {
 
   const captureCameraFrame = async () => {
     if (isProcessing) {
-      return;
-    }
-
-    if (ocrStatus !== 'ready') {
-      setCameraError(
-        ocrStatus === 'error'
-          ? 'El lector OCR falló al cargar. Toca el botón para reintentarlo.'
-          : 'El lector OCR todavía se está preparando.',
-      );
-      void ensureOcrReady()
-        .then(() => {
-          setCameraError(null);
-        })
-        .catch(() => {
-          setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-        });
       return;
     }
 
@@ -1195,6 +1094,34 @@ export default function App() {
     video.pause();
     beginScanFromCapture(captureCanvas, blob);
   };
+
+  const initOcr = async () => {
+    if (isOcrInitialized.current) {
+      return;
+    }
+
+    isOcrInitialized.current = true;
+    setOcrStatus('initializing');
+    setOcrInitError(null);
+
+    try {
+      await ocr.init(DETECTION_MODEL_PATH, RECOGNITION_MODEL_PATH);
+      setOcrStatus('ready');
+    } catch (error) {
+      console.error('Error al inicializar OCR:', error);
+      isOcrInitialized.current = false;
+      setOcrStatus('error');
+      setOcrInitError(
+        error instanceof Error
+          ? error.message
+          : 'No se pudo inicializar el motor OCR en este dispositivo.',
+      );
+    }
+  };
+
+  useEffect(() => {
+    void initOcr();
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1243,24 +1170,24 @@ export default function App() {
   return (
     <div className="container">
       <main className="content">
-        {ocrStatus === 'initializing' && !isCameraActive ? (
+        {ocrStatus === 'initializing' ? (
           <div className="status-box initializing">
             <Loader2 className="spinner" size={32} />
             <p>
-              Cargando lector OCR
+              Inicializando OCR
               <br />
               <small>La primera carga puede tardar unos segundos</small>
             </p>
           </div>
-        ) : ocrStatus === 'error' && !isCameraActive ? (
+        ) : ocrStatus === 'error' ? (
           <div className="status-box initializing">
             <XCircle size={32} className="icon-invalid" />
             <p>
-              No se pudo cargar el lector OCR
+              No se pudo inicializar el OCR
               <br />
               <small>{ocrInitError ?? 'Intenta nuevamente.'}</small>
             </p>
-            <button className="primary-btn" onClick={() => void ensureOcrReady()}>
+            <button className="primary-btn" onClick={() => void initOcr()}>
               Reintentar
             </button>
           </div>
@@ -1295,10 +1222,10 @@ export default function App() {
                   <div className="camera-guide" />
                   <div className="camera-guide-label">Alinea el número de serie aquí</div>
 
-                  {(isProcessing || isPreparingOcr) && (
+                  {isProcessing && (
                     <div className="processing-overlay">
                       <Loader2 className="spinner" size={42} />
-                      <span>{isProcessing ? 'Escaneando serial...' : 'Preparando lector...'}</span>
+                      <span>Escaneando serial...</span>
                     </div>
                   )}
                 </div>
@@ -1311,16 +1238,10 @@ export default function App() {
               <button
                 type="button"
                 className="primary-btn"
-                disabled={isProcessing || isStartingCamera || (isCameraActive && isPreparingOcr)}
+                disabled={isProcessing || isStartingCamera}
                 onClick={() => {
                   if (isCameraActive) {
-                    if (ocrStatus === 'ready') {
-                      void captureCameraFrame();
-                    } else {
-                      void ensureOcrReady().catch(() => {
-                        setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-                      });
-                    }
+                    void captureCameraFrame();
                   } else {
                     void startCamera();
                   }
@@ -1329,11 +1250,7 @@ export default function App() {
                 <Camera size={20} />
                 <span>
                   {isCameraActive
-                    ? isPreparingOcr
-                      ? 'Preparando lector...'
-                      : ocrStatus === 'error'
-                        ? 'Reintentar lector'
-                        : 'Tomar foto del serial'
+                    ? 'Tomar foto del serial'
                     : isStartingCamera
                       ? 'Abriendo cámara...'
                       : 'Abrir cámara guiada'}
