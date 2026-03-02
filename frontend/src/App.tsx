@@ -10,6 +10,7 @@ const FOREGROUND_ANALYSIS_MAX_SIDE = 256;
 const FOREGROUND_COLOR_DISTANCE_THRESHOLD = 44;
 const FOREGROUND_CHROMA_THRESHOLD = 20;
 const ACCEPTED_CONFIDENCE_THRESHOLD = 0.75;
+const SHOW_UPLOAD_ACTION = false;
 
 type RelativeCropPreset = {
   id: string;
@@ -1036,15 +1037,17 @@ export default function App() {
               </span>
             </button>
 
-            <button
-              type="button"
-              className="secondary-btn"
-              disabled={isBusy}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <ImageUp size={20} />
-              <span>Probar con imagen</span>
-            </button>
+            {SHOW_UPLOAD_ACTION && (
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={isBusy}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <ImageUp size={20} />
+                <span>Probar con imagen</span>
+              </button>
+            )}
 
             {isCameraActive && isTorchAvailable && (
               <button
