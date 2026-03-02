@@ -966,11 +966,10 @@ export default function App() {
       <main className="content">
         <section className="camera-card">
           <div className="camera-copy">
-            <span className="camera-badge">Servidor OCR</span>
             <h2>Coloca el número de serie dentro del recuadro</h2>
             <p>
-              La foto se envía a tu backend para leer solo el serial. Selecciona primero la
-              denominación para validar el número contra los rangos reportados por el BCB.
+              Selecciona primero la denominación para validar el 
+              número contra los rangos reportados por el BCB.
             </p>
           </div>
 
