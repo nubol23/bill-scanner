@@ -874,7 +874,6 @@ export default function App() {
   const [scanFeedback, setScanFeedback] = useState<ScanFeedback>('none');
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
-  const [isPreparingOcr, setIsPreparingOcr] = useState(false);
   const [isTorchAvailable, setIsTorchAvailable] = useState(false);
   const [isTorchEnabled, setIsTorchEnabled] = useState(false);
   const [isTogglingTorch, setIsTogglingTorch] = useState(false);
@@ -1000,7 +999,6 @@ export default function App() {
       return ocrModuleRef.current;
     }
 
-    setIsPreparingOcr(true);
     setOcrStatus('initializing');
     setOcrInitError(null);
 
@@ -1035,7 +1033,6 @@ export default function App() {
         ocrInitPromiseRef.current = null;
       }
 
-      setIsPreparingOcr(false);
     }
   };
 
@@ -1171,11 +1168,6 @@ export default function App() {
       setCameraError(null);
       setIsCameraActive(true);
       syncTorchAvailability();
-      if (ocrStatus !== 'ready') {
-        void ensureOcrReady().catch(() => {
-          setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-        });
-      }
       return;
     }
 
@@ -1201,9 +1193,6 @@ export default function App() {
       setIsCameraActive(true);
       setIsTorchEnabled(false);
       syncTorchAvailability();
-      void ensureOcrReady().catch(() => {
-        setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-      });
     } catch (error) {
       console.error('Error al abrir la cámara:', error);
       setCameraError('No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.');
@@ -1214,22 +1203,6 @@ export default function App() {
 
   const captureCameraFrame = async () => {
     if (isProcessing) {
-      return;
-    }
-
-    if (ocrStatus !== 'ready') {
-      setCameraError(
-        ocrStatus === 'error'
-          ? 'El lector OCR falló al cargar. Toca el botón para reintentarlo.'
-          : 'El lector OCR todavía se está preparando.',
-      );
-      void ensureOcrReady()
-        .then(() => {
-          setCameraError(null);
-        })
-        .catch(() => {
-          setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-        });
       return;
     }
 
@@ -1266,7 +1239,7 @@ export default function App() {
 
     const blob = await canvasToBlob(captureCanvas);
 
-    video.pause();
+    stopCamera();
     beginScanFromCapture(captureCanvas, blob);
   };
 
@@ -1344,8 +1317,9 @@ export default function App() {
               <span className="camera-badge">Recomendado</span>
               <h2>Captura guiada del serial</h2>
               <p>
-                Coloca solo el número de serie dentro del recuadro. Puedes dejar la cámara abierta
-                y seguir tomando fotos para revisar varios billetes seguidos.
+                Coloca solo el número de serie dentro del recuadro. La app toma una captura y
+                libera la cámara antes de analizarla para evitar cierres del navegador en
+                teléfonos.
               </p>
             </div>
 
@@ -1354,27 +1328,13 @@ export default function App() {
                 <div className="camera-stage">
                   <video
                     ref={videoRef}
-                    className={`camera-video ${isProcessing && imageSrc ? 'camera-video-hidden' : ''}`}
+                    className="camera-video"
                     autoPlay
                     muted
                     playsInline
                   />
-                  {isProcessing && imageSrc && (
-                    <img
-                      src={imageSrc}
-                      alt="Última captura del serial"
-                      className="camera-still"
-                    />
-                  )}
                   <div className="camera-guide" />
                   <div className="camera-guide-label">Alinea el número de serie aquí</div>
-
-                  {(isProcessing || isPreparingOcr) && (
-                    <div className="processing-overlay">
-                      <Loader2 className="spinner" size={42} />
-                      <span>{isProcessing ? 'Escaneando serial...' : 'Preparando lector...'}</span>
-                    </div>
-                  )}
                 </div>
               </div>
             )}
@@ -1385,16 +1345,10 @@ export default function App() {
               <button
                 type="button"
                 className="primary-btn"
-                disabled={isProcessing || isStartingCamera || (isCameraActive && isPreparingOcr)}
+                disabled={isProcessing || isStartingCamera}
                 onClick={() => {
                   if (isCameraActive) {
-                    if (ocrStatus === 'ready') {
-                      void captureCameraFrame();
-                    } else {
-                      void ensureOcrReady().catch(() => {
-                        setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
-                      });
-                    }
+                    void captureCameraFrame();
                   } else {
                     void startCamera();
                   }
@@ -1403,11 +1357,7 @@ export default function App() {
                 <Camera size={20} />
                 <span>
                   {isCameraActive
-                    ? isPreparingOcr
-                      ? 'Preparando lector...'
-                      : ocrStatus === 'error'
-                        ? 'Reintentar lector'
-                        : 'Tomar foto del serial'
+                    ? 'Tomar foto del serial'
                     : isStartingCamera
                       ? 'Abriendo cámara...'
                       : 'Abrir cámara guiada'}
