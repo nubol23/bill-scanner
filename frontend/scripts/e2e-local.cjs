@@ -36,7 +36,7 @@ function extractExpectedSerial(fileName) {
       const fileInput = page.locator('input[type="file"]').first();
       await fileInput.setInputFiles(path.join(IMAGES_DIR, file));
       await page.waitForFunction(
-        () => !document.body.textContent.includes('Consultando OCR remoto...'),
+        () => !document.body.textContent.includes('Analizando imagen...'),
         undefined,
         { timeout: 30000 },
       );

@@ -63,7 +63,7 @@ export async function scanSerialImage(
       const detail =
         typeof payload === 'object' && payload && 'detail' in payload
           ? String((payload as { detail: unknown }).detail)
-          : 'El servidor OCR devolvió un error.';
+          : 'No se pudo procesar la imagen.';
 
       if (response.status === 429) {
         throw new ScanApiError('rate-limited', detail, response.status);
@@ -91,7 +91,7 @@ export async function scanSerialImage(
 
     throw new ScanApiError(
       'unavailable',
-      'No se pudo conectar con el servidor OCR. Revisa tu conexión o el túnel.',
+      'No se pudo conectar con el servicio de análisis. Verifica tu conexión e intenta de nuevo.',
     );
   } finally {
     window.clearTimeout(timeoutId);

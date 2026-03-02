@@ -11,7 +11,6 @@ async function cleanupLegacyRuntime() {
       const registrations = await navigator.serviceWorker.getRegistrations()
       await Promise.all(registrations.map((registration) => registration.unregister()))
     } catch {
-      // Ignore cleanup failures; this is a best-effort migration path.
     }
   }
 
@@ -28,7 +27,6 @@ async function cleanupLegacyRuntime() {
           .map((cacheName) => caches.delete(cacheName)),
       )
     } catch {
-      // Ignore cleanup failures; this is a best-effort migration path.
     }
   }
 }

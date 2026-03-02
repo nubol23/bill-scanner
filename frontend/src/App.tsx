@@ -544,11 +544,11 @@ function errorMessageForScan(error: unknown) {
       case 'unavailable':
         return error.message;
       case 'rate-limited':
-        return 'Se alcanzó el límite temporal del servidor OCR. Espera unos segundos.';
+        return 'El servicio está recibiendo muchas solicitudes. Espera unos segundos.';
       case 'invalid-image':
         return error.message;
       default:
-        return 'El servidor OCR falló. Intenta de nuevo en unos segundos.';
+        return 'No se pudo completar el análisis. Intenta de nuevo en unos segundos.';
     }
   }
 
@@ -807,7 +807,7 @@ export default function App() {
       clearScanOutput();
       setPreviewFromBlob(previewBlob);
       setCameraError(null);
-      await processDirectBlob(previewBlob, 'Consultando OCR remoto...', 'captura guiada');
+      await processDirectBlob(previewBlob, 'Analizando imagen...', 'captura guiada');
     } catch (error) {
       setCameraError(errorMessageForScan(error));
     } finally {
@@ -839,7 +839,7 @@ export default function App() {
 
       if (isStripLike) {
         setPreviewFromBlob(file);
-        const response = await runRemoteScan(file, 'Consultando OCR remoto...', 'imagen completa');
+        const response = await runRemoteScan(file, 'Analizando imagen...', 'imagen completa');
         await applyRecognizeResponse(response);
         return;
       }
@@ -869,7 +869,7 @@ export default function App() {
 
         const response = await runRemoteScan(
           croppedBlob,
-          'Consultando OCR remoto...',
+          'Analizando imagen...',
           `${candidate.label} (${index + 1}/${orderedCandidates.length})`,
         );
 
@@ -1078,7 +1078,7 @@ export default function App() {
             {isProcessing && !isCameraActive && (
               <div className="processing-overlay">
                 <Loader2 className="spinner" size={48} />
-                <span>Consultando OCR remoto...</span>
+                <span>Analizando imagen...</span>
                 <LoadingProgressBar progress={scanProgress} />
               </div>
             )}
@@ -1128,9 +1128,6 @@ export default function App() {
       </main>
 
       <footer className="footer-copyright">
-        <button type="button" className="footer-note footer-note-trigger">
-          Esta app ahora usa tu servidor OCR, así que depende de la red y del túnel activo.
-        </button>
         <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
           © {new Date().getFullYear()} nubol23
         </a>
