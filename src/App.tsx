@@ -12,7 +12,7 @@ const MOBILE_MAX_VIEWPORT_WIDTH = 768;
 const CAMERA_FRAME_WIDTH_RATIO = 0.78;
 const CAMERA_FRAME_HEIGHT_RATIO = 0.18;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
-const FALLBACK_FILTER = 'grayscale(100%) contrast(1.18) brightness(1.05)';
+const OCR_RECOGNITION_TIMEOUT_MS = 8000;
 const DENOMINATION_VALUES = ['200', '100', '50', '20', '10'] as const;
 const DENOMINATION_SET = new Set<string>(DENOMINATION_VALUES);
 
@@ -103,9 +103,14 @@ type OcrSegment = {
   isDenominationToken: boolean;
 };
 
-type PreparedImage = {
-  image: HTMLImageElement;
-  revoke: () => void;
+type OcrCompatibleCanvas = HTMLCanvasElement & {
+  naturalWidth: number;
+  naturalHeight: number;
+};
+
+type PreparedCanvas = {
+  canvas: OcrCompatibleCanvas;
+  release: () => void;
 };
 
 type ScanFeedback = 'none' | 'not-found' | 'low-confidence';
@@ -113,7 +118,6 @@ type ScanFeedback = 'none' | 'not-found' | 'low-confidence';
 type RecognitionPassResult = {
   tokens: string[];
   candidates: SerialCandidate[];
-  results: SerialResult[];
 };
 
 type SerialScanOutcome = {
@@ -123,6 +127,13 @@ type SerialScanOutcome = {
 };
 
 const noop = () => undefined;
+
+class OcrTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`El OCR tardó demasiado en responder (${timeoutMs} ms).`);
+    this.name = 'OcrTimeoutError';
+  }
+}
 
 function distance(a: OcrPoint, b: OcrPoint) {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -325,51 +336,6 @@ function waitForNextPaint(frames = 1) {
     };
 
     nextFrame(frames);
-  });
-}
-
-function mergeConfirmedCandidates(
-  primaryCandidates: SerialCandidate[],
-  fallbackCandidates: SerialCandidate[],
-) {
-  const fallbackBySerial = new Map(
-    fallbackCandidates.map((candidate) => [candidate.serialDisplay, candidate]),
-  );
-  const confirmed: SerialCandidate[] = [];
-
-  for (const primaryCandidate of primaryCandidates) {
-    const fallbackCandidate = fallbackBySerial.get(primaryCandidate.serialDisplay);
-    if (!fallbackCandidate) {
-      continue;
-    }
-
-    confirmed.push({
-      serialDisplay: primaryCandidate.serialDisplay,
-      source:
-        getSourcePriority(primaryCandidate.source) >= getSourcePriority(fallbackCandidate.source)
-          ? primaryCandidate.source
-          : fallbackCandidate.source,
-      segmentIndexes: Array.from(
-        new Set([...primaryCandidate.segmentIndexes, ...fallbackCandidate.segmentIndexes]),
-      ),
-      confidence: clamp(
-        Math.round((primaryCandidate.confidence + fallbackCandidate.confidence) / 2) + 10,
-        1,
-        200,
-      ),
-    });
-  }
-
-  return confirmed.sort((left, right) => {
-    if (right.confidence !== left.confidence) {
-      return right.confidence - left.confidence;
-    }
-
-    if (right.serialDisplay.length !== left.serialDisplay.length) {
-      return right.serialDisplay.length - left.serialDisplay.length;
-    }
-
-    return getSourcePriority(right.source) - getSourcePriority(left.source);
   });
 }
 
@@ -783,42 +749,73 @@ function toSerialResults(candidates: SerialCandidate[]) {
     .filter((result): result is SerialResult => result !== null);
 }
 
-function loadImageFromUrl(url: string) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
-    image.decoding = 'async';
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('No se pudo cargar la imagen seleccionada.'));
-    image.src = url;
+function tagCanvasForOcr(canvas: HTMLCanvasElement) {
+  const taggedCanvas = canvas as OcrCompatibleCanvas;
+  taggedCanvas.naturalWidth = canvas.width;
+  taggedCanvas.naturalHeight = canvas.height;
+  return taggedCanvas;
+}
+
+function releaseCanvas(canvas: HTMLCanvasElement | null) {
+  if (!canvas) {
+    return;
+  }
+
+  const context = canvas.getContext('2d');
+  if (context) {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(resolve, 'image/jpeg', DERIVATIVE_JPEG_QUALITY);
   });
 }
 
-async function createPreparedImageVariant(
-  sourceImage: HTMLImageElement,
-  options: {
-    maxDimension: number;
-    filter: string | null;
-  },
-): Promise<PreparedImage> {
-  const naturalWidth = sourceImage.naturalWidth || sourceImage.width;
-  const naturalHeight = sourceImage.naturalHeight || sourceImage.height;
+async function withTimeout<T>(work: () => Promise<T>, timeoutMs: number) {
+  let timeoutId: number | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new OcrTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([work(), timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function createPreparedCanvasVariant(
+  sourceCanvas: OcrCompatibleCanvas,
+  maxDimension: number,
+): PreparedCanvas {
+  const naturalWidth = sourceCanvas.naturalWidth || sourceCanvas.width;
+  const naturalHeight = sourceCanvas.naturalHeight || sourceCanvas.height;
   if (!naturalWidth || !naturalHeight) {
-    return { image: sourceImage, revoke: noop };
+    return { canvas: sourceCanvas, release: noop };
   }
 
   let targetWidth = naturalWidth;
   let targetHeight = naturalHeight;
   const longestSide = Math.max(naturalWidth, naturalHeight);
 
-  if (longestSide > options.maxDimension) {
-    const scale = options.maxDimension / longestSide;
+  if (longestSide > maxDimension) {
+    const scale = maxDimension / longestSide;
     targetWidth = Math.max(1, Math.round(naturalWidth * scale));
     targetHeight = Math.max(1, Math.round(naturalHeight * scale));
   }
 
   const needsResize = targetWidth !== naturalWidth || targetHeight !== naturalHeight;
-  if (!needsResize && !options.filter) {
-    return { image: sourceImage, revoke: noop };
+  if (!needsResize) {
+    return { canvas: sourceCanvas, release: noop };
   }
 
   const canvas = document.createElement('canvas');
@@ -827,39 +824,18 @@ async function createPreparedImageVariant(
   const context = canvas.getContext('2d');
 
   if (!context) {
-    canvas.width = 0;
-    canvas.height = 0;
-    return { image: sourceImage, revoke: noop };
+    releaseCanvas(canvas);
+    return { canvas: sourceCanvas, release: noop };
   }
 
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, targetWidth, targetHeight);
-  context.filter = options.filter ?? 'none';
-  context.drawImage(sourceImage, 0, 0, targetWidth, targetHeight);
-  context.filter = 'none';
+  context.drawImage(sourceCanvas, 0, 0, targetWidth, targetHeight);
 
-  const blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob(resolve, 'image/jpeg', DERIVATIVE_JPEG_QUALITY);
-  });
-
-  canvas.width = 0;
-  canvas.height = 0;
-
-  if (!blob) {
-    return { image: sourceImage, revoke: noop };
-  }
-
-  const objectUrl = URL.createObjectURL(blob);
-  try {
-    const image = await loadImageFromUrl(objectUrl);
-    return {
-      image,
-      revoke: () => URL.revokeObjectURL(objectUrl),
-    };
-  } catch {
-    URL.revokeObjectURL(objectUrl);
-    return { image: sourceImage, revoke: noop };
-  }
+  return {
+    canvas: tagCanvasForOcr(canvas),
+    release: () => releaseCanvas(canvas),
+  };
 }
 
 export default function App() {
@@ -879,10 +855,15 @@ export default function App() {
   const compactImageModeRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
 
-  const setPreviewFromBlob = (blob: Blob) => {
+  const revokePreviewUrl = () => {
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
     }
+  };
+
+  const setPreviewFromBlob = (blob: Blob) => {
+    revokePreviewUrl();
 
     const previewUrl = URL.createObjectURL(blob);
     previewUrlRef.current = previewUrl;
@@ -911,8 +892,13 @@ export default function App() {
     setIsStartingCamera(false);
   };
 
-  const runRecognitionPass = async (image: HTMLImageElement): Promise<RecognitionPassResult> => {
-    const response = (await ocr.recognize(image)) as OcrResponse | null;
+  const runRecognitionPass = async (
+    sourceCanvas: OcrCompatibleCanvas,
+  ): Promise<RecognitionPassResult> => {
+    const response = await withTimeout(
+      async () => (await ocr.recognize(sourceCanvas)) as OcrResponse | null,
+      OCR_RECOGNITION_TIMEOUT_MS,
+    );
     const tokens = Array.isArray(response?.text)
       ? response.text.filter((token): token is string => typeof token === 'string')
       : [];
@@ -921,74 +907,41 @@ export default function App() {
     return {
       tokens,
       candidates,
-      results: toSerialResults(candidates),
     };
   };
 
   const runConfirmedScan = async (
-    sourceImage: HTMLImageElement,
+    sourceCanvas: OcrCompatibleCanvas,
     maxDimension: number,
   ): Promise<SerialScanOutcome> => {
-    const primaryImage = await createPreparedImageVariant(sourceImage, {
-      maxDimension,
-      filter: null,
-    });
-
-    let primaryPass: RecognitionPassResult = {
+    const preparedCanvas = createPreparedCanvasVariant(sourceCanvas, maxDimension);
+    let recognitionPass: RecognitionPassResult = {
       tokens: [],
       candidates: [],
-      results: [],
     };
 
     try {
-      primaryPass = await runRecognitionPass(primaryImage.image);
+      recognitionPass = await runRecognitionPass(preparedCanvas.canvas);
     } finally {
-      primaryImage.revoke();
+      preparedCanvas.release();
     }
 
-    const fallbackImage = await createPreparedImageVariant(sourceImage, {
-      maxDimension,
-      filter: FALLBACK_FILTER,
-    });
-
-    let fallbackPass: RecognitionPassResult = {
-      tokens: [],
-      candidates: [],
-      results: [],
-    };
-
-    try {
-      fallbackPass = await runRecognitionPass(fallbackImage.image);
-    } finally {
-      fallbackImage.revoke();
-    }
-
-    const confirmedCandidates = mergeConfirmedCandidates(
-      primaryPass.candidates,
-      fallbackPass.candidates,
-    );
+    const results = toSerialResults(recognitionPass.candidates);
+    const sawNumericHint = recognitionPass.tokens.some((token) => /[0-9OQDIL|ZSGB]/i.test(token));
 
     return {
-      tokens: Array.from(new Set([...primaryPass.tokens, ...fallbackPass.tokens])),
-      results: toSerialResults(confirmedCandidates),
-      feedback:
-        confirmedCandidates.length > 0
-          ? 'none'
-          : primaryPass.candidates.length > 0 || fallbackPass.candidates.length > 0
-            ? 'low-confidence'
-            : 'not-found',
+      tokens: recognitionPass.tokens,
+      results,
+      feedback: results.length > 0 ? 'none' : sawNumericHint ? 'low-confidence' : 'not-found',
     };
   };
 
-  const processSelectedFile = async (file: File) => {
+  const processCapturedCanvas = async (captureCanvas: OcrCompatibleCanvas) => {
     const jobId = ++activeJobRef.current;
-    const sourceUrl = URL.createObjectURL(file);
-    let sourceImage: HTMLImageElement | null = null;
     setIsProcessing(true);
 
     try {
       await waitForNextPaint(2);
-      sourceImage = await loadImageFromUrl(sourceUrl);
       if (activeJobRef.current !== jobId) {
         return;
       }
@@ -1000,11 +953,11 @@ export default function App() {
 
       let scanOutcome: SerialScanOutcome;
       try {
-        scanOutcome = await runConfirmedScan(sourceImage, initialMaxDimension);
+        scanOutcome = await runConfirmedScan(captureCanvas, initialMaxDimension);
       } catch (error) {
         if (initialMaxDimension !== COMPACT_MAX_DIMENSION && looksLikeMemoryError(error)) {
           compactImageModeRef.current = true;
-          scanOutcome = await runConfirmedScan(sourceImage, COMPACT_MAX_DIMENSION);
+          scanOutcome = await runConfirmedScan(captureCanvas, COMPACT_MAX_DIMENSION);
         } else {
           throw error;
         }
@@ -1016,6 +969,7 @@ export default function App() {
 
       setResults(scanOutcome.results);
       setScanFeedback(scanOutcome.feedback);
+      setCameraError(null);
     } catch (error) {
       if (activeJobRef.current !== jobId) {
         return;
@@ -1024,11 +978,23 @@ export default function App() {
       console.error('Error de OCR:', error);
       setResults(null);
       setScanFeedback('none');
-    } finally {
-      URL.revokeObjectURL(sourceUrl);
-      if (sourceImage) {
-        sourceImage.src = '';
+      compactImageModeRef.current = true;
+
+      if (error instanceof OcrTimeoutError) {
+        stopCamera();
+        setCameraError(
+          'El OCR tardó demasiado en responder. Se cerró la cámara para liberar memoria; ábrela de nuevo e intenta otra vez.',
+        );
+      } else if (looksLikeMemoryError(error)) {
+        stopCamera();
+        setCameraError(
+          'El dispositivo se quedó sin memoria durante el escaneo. Se cerró la cámara para liberar recursos.',
+        );
+      } else {
+        setCameraError('No se pudo completar el escaneo. Intenta de nuevo.');
       }
+    } finally {
+      releaseCanvas(captureCanvas);
 
       if (activeJobRef.current === jobId) {
         setIsProcessing(false);
@@ -1036,16 +1002,16 @@ export default function App() {
     }
   };
 
-  const beginScanFromBlob = (blob: Blob, fileName: string) => {
+  const beginScanFromCapture = (captureCanvas: OcrCompatibleCanvas, previewBlob: Blob | null) => {
     clearScanOutput();
-    setPreviewFromBlob(blob);
+    if (previewBlob) {
+      setPreviewFromBlob(previewBlob);
+    } else {
+      revokePreviewUrl();
+      setImageSrc(null);
+    }
     setCameraError(null);
-
-    const file = new File([blob], fileName, {
-      type: blob.type || 'image/jpeg',
-    });
-
-    void processSelectedFile(file);
+    void processCapturedCanvas(captureCanvas);
   };
 
   const startCamera = async () => {
@@ -1102,11 +1068,11 @@ export default function App() {
     const canvas = document.createElement('canvas');
     canvas.width = guideRect.width;
     canvas.height = guideRect.height;
-    const context = canvas.getContext('2d');
+    const captureCanvas = tagCanvasForOcr(canvas);
+    const context = captureCanvas.getContext('2d');
 
     if (!context) {
-      canvas.width = 0;
-      canvas.height = 0;
+      releaseCanvas(captureCanvas);
       setCameraError('No se pudo preparar la captura. Intenta de nuevo.');
       return;
     }
@@ -1123,20 +1089,10 @@ export default function App() {
       guideRect.height,
     );
 
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, 'image/jpeg', DERIVATIVE_JPEG_QUALITY);
-    });
-
-    canvas.width = 0;
-    canvas.height = 0;
-
-    if (!blob) {
-      setCameraError('No se pudo capturar la foto. Intenta de nuevo.');
-      return;
-    }
+    const blob = await canvasToBlob(captureCanvas);
 
     video.pause();
-    beginScanFromBlob(blob, `serial-${Date.now()}.jpg`);
+    beginScanFromCapture(captureCanvas, blob);
   };
 
   const initOcr = async () => {
@@ -1149,10 +1105,6 @@ export default function App() {
     setOcrInitError(null);
 
     try {
-      if ('caches' in window) {
-        void caches.delete('paddlejs-models-v1');
-      }
-
       await ocr.init(DETECTION_MODEL_PATH, RECOGNITION_MODEL_PATH);
       setOcrStatus('ready');
     } catch (error) {
@@ -1207,9 +1159,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       activeJobRef.current += 1;
-      if (previewUrlRef.current) {
-        URL.revokeObjectURL(previewUrlRef.current);
-      }
+      revokePreviewUrl();
       const stream = streamRef.current;
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());

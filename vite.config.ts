@@ -9,7 +9,7 @@ export default defineConfig({
       injectRegister: "auto",
       registerType: "autoUpdate",
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
       manifest: {
         name: "Billete Scanner",
