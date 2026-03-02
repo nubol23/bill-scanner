@@ -285,6 +285,73 @@ body {
   line-height: 1.55;
 }
 
+.denomination-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.85rem;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #f9fafb 0%, #f3f4f6 100%);
+}
+
+.denomination-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.45rem 0.75rem;
+}
+
+.denomination-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-main);
+}
+
+.denomination-copy small {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.denomination-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.denomination-chip {
+  border: 1px solid rgba(107, 114, 128, 0.25);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-main);
+  border-radius: 999px;
+  padding: 0.55rem 0.9rem;
+  font-size: 0.84rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.12s ease;
+}
+
+.denomination-chip:hover {
+  border-color: rgba(55, 65, 81, 0.35);
+}
+
+.denomination-chip:active {
+  transform: translateY(1px);
+}
+
+.denomination-chip.active {
+  border-color: #111827;
+  background: #111827;
+  color: #ffffff;
+}
+
 .camera-badge {
   display: inline-flex;
   align-items: center;

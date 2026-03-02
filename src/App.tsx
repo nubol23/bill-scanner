@@ -40,6 +40,8 @@ type UploadCropCandidate = {
   rect: CropRect;
 };
 
+type BillDenomination = '10' | '20' | '50';
+
 const UPLOAD_SCAN_PRESETS: readonly RelativeCropPreset[] = [
   {
     id: 'top-right-left',
@@ -91,46 +93,54 @@ const UPLOAD_SCAN_PRESETS: readonly RelativeCropPreset[] = [
   },
 ] as const;
 
-const validRanges = [
-  [67250001, 67700000],
-  [69050001, 69500000],
-  [69500001, 69950000],
-  [69950001, 70400000],
-  [70400001, 70850000],
-  [70850001, 71300000],
-  [76310012, 85139995],
-  [86400001, 86850000],
-  [90900001, 91350000],
-  [91800001, 92250000],
-  [87280145, 91646549],
-  [96650001, 97100000],
-  [99800001, 100250000],
-  [100250001, 100700000],
-  [109250001, 109700000],
-  [110600001, 111050000],
-  [111050001, 111500000],
-  [111950001, 112400000],
-  [112400001, 112850000],
-  [112850001, 113300000],
-  [114200001, 114650000],
-  [114650001, 115100000],
-  [115100001, 115550000],
-  [118700001, 119150000],
-  [119150001, 119600000],
-  [120500001, 120950000],
-  [77100001, 77550000],
-  [78000001, 78450000],
-  [78900001, 96350000],
-  [96350001, 96800000],
-  [96800001, 97250000],
-  [98150001, 98600000],
-  [104900001, 105350000],
-  [105350001, 105800000],
-  [106700001, 107150000],
-  [107600001, 108050000],
-  [108050001, 108500000],
-  [109400001, 109850000],
-] as const;
+const BILL_DENOMINATIONS = ['10', '20', '50'] as const satisfies readonly BillDenomination[];
+
+const INVALID_RANGES_BY_DENOMINATION: Record<BillDenomination, ReadonlyArray<readonly [number, number]>> = {
+  '10': [
+    [77100001, 77550000],
+    [78000001, 78450000],
+    [78900001, 96350000],
+    [96350001, 96800000],
+    [96800001, 97250000],
+    [98150001, 98600000],
+    [104900001, 105350000],
+    [105350001, 105800000],
+    [106700001, 107150000],
+    [107600001, 108050000],
+    [108050001, 108500000],
+    [109400001, 109850000],
+  ],
+  '20': [
+    [87280145, 91646549],
+    [96650001, 97100000],
+    [99800001, 100250000],
+    [100250001, 100700000],
+    [109250001, 109700000],
+    [110600001, 111050000],
+    [111050001, 111500000],
+    [111950001, 112400000],
+    [112400001, 112850000],
+    [112850001, 113300000],
+    [114200001, 114650000],
+    [114650001, 115100000],
+    [115100001, 115550000],
+    [118700001, 119150000],
+    [119150001, 119600000],
+    [120500001, 120950000],
+  ],
+  '50': [
+    [67250001, 67700000],
+    [69050001, 69500000],
+    [69500001, 69950000],
+    [69950001, 70400000],
+    [70400001, 70850000],
+    [70850001, 71300000],
+    [76310012, 85139995],
+    [86400001, 86850000],
+    [90900001, 91350000],
+    [91800001, 92250000],
+  ],
+};
 
 type OcrStatus = 'idle' | 'initializing' | 'ready' | 'error';
 
@@ -614,11 +624,13 @@ function extractSerialNumber(serialDisplay: string) {
   return Number.isFinite(serialNumeric) ? serialNumeric : null;
 }
 
-function isReportedAsInvalid(serialNumeric: number) {
-  return validRanges.some(([min, max]) => serialNumeric >= min && serialNumeric <= max);
+function isReportedAsInvalid(serialNumeric: number, denomination: BillDenomination) {
+  return INVALID_RANGES_BY_DENOMINATION[denomination].some(
+    ([min, max]) => serialNumeric >= min && serialNumeric <= max,
+  );
 }
 
-function toSerialResults(serials: DetectedSerial[]) {
+function toSerialResults(serials: DetectedSerial[], denomination: BillDenomination) {
   return serials
     .map<SerialResult | null>((serial) => {
       const serialNumeric = extractSerialNumber(serial.value);
@@ -627,7 +639,7 @@ function toSerialResults(serials: DetectedSerial[]) {
       }
 
       return {
-        isValid: !isReportedAsInvalid(serialNumeric),
+        isValid: !isReportedAsInvalid(serialNumeric, denomination),
         serialDisplay: serial.value,
         serialNumeric,
         source: serial.source,
@@ -673,6 +685,7 @@ function workerErrorMessage(error: unknown, fallback: string) {
 export default function App() {
   const [ocrStatus, setOcrStatus] = useState<OcrStatus>('idle');
   const [ocrInitError, setOcrInitError] = useState<string | null>(null);
+  const [selectedDenomination, setSelectedDenomination] = useState<BillDenomination>('50');
   const [isProcessing, setIsProcessing] = useState(false);
   const [isDiagnosticsVisible, setIsDiagnosticsVisible] = useState(false);
   const [isDiagnosticsRunning, setIsDiagnosticsRunning] = useState(false);
@@ -695,6 +708,7 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const diagnosticInputRef = useRef<HTMLInputElement>(null);
+  const selectedDenominationRef = useRef<BillDenomination>(selectedDenomination);
   const warmupPromiseRef = useRef<Promise<void> | null>(null);
   const activeJobRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
@@ -721,6 +735,11 @@ export default function App() {
   function clearScanOutput() {
     setResults(null);
     setScanFeedback('none');
+  }
+
+  function handleDenominationChange(denomination: BillDenomination) {
+    selectedDenominationRef.current = denomination;
+    setSelectedDenomination(denomination);
   }
 
   function clearFooterTapResetTimer() {
@@ -1050,7 +1069,7 @@ export default function App() {
         return;
       }
 
-      setResults(toSerialResults(scan.serials));
+      setResults(toSerialResults(scan.serials, selectedDenominationRef.current));
       setScanFeedback(scan.feedback);
       setCameraError(null);
     } catch (error) {
@@ -1128,7 +1147,7 @@ export default function App() {
 
       ensureActiveJob(jobId);
 
-      const serialResults = toSerialResults(aggregated.serials);
+      const serialResults = toSerialResults(aggregated.serials, selectedDenominationRef.current);
       setResults(serialResults);
       setScanFeedback(aggregated.feedback);
     } catch (error) {
@@ -1226,7 +1245,10 @@ export default function App() {
           );
           ensureActiveJob(jobId);
 
-          const serialResults = toSerialResults(aggregated.serials);
+          const serialResults = toSerialResults(
+            aggregated.serials,
+            selectedDenominationRef.current,
+          );
           const bestResult = serialResults[0] ?? null;
           const detected = bestResult?.serialDisplay ?? null;
           nextResults.push({
@@ -1480,6 +1502,20 @@ export default function App() {
     });
   }, [isProcessing, results, scanFeedback]);
 
+  useEffect(() => {
+    selectedDenominationRef.current = selectedDenomination;
+    setResults((current) => {
+      if (!current || current.length === 0) {
+        return current;
+      }
+
+      return current.map((result) => ({
+        ...result,
+        isValid: !isReportedAsInvalid(result.serialNumeric, selectedDenomination),
+      }));
+    });
+  }, [selectedDenomination]);
+
   const diagnosticComparableCount = diagnosticResults.filter(
     (result) => result.expected !== null,
   ).length;
@@ -1522,6 +1558,32 @@ export default function App() {
           <section className="camera-card">
             <div className="camera-copy">
               <h2>Coloca el número de serie dentro del recuadro</h2>
+              <p>
+                Selecciona primero la denominación del billete. La validación del serial se hace
+                solo contra los rangos reportados para ese valor.
+              </p>
+            </div>
+
+            <div className="denomination-selector" role="group" aria-label="Seleccionar denominación">
+              <div className="denomination-copy">
+                <span className="denomination-label">Denominación</span>
+                <small>Valor activo: Bs {selectedDenomination}</small>
+              </div>
+              <div className="denomination-options">
+                {BILL_DENOMINATIONS.map((denomination) => (
+                  <button
+                    key={denomination}
+                    type="button"
+                    className={`denomination-chip ${
+                      selectedDenomination === denomination ? 'active' : ''
+                    }`}
+                    aria-pressed={selectedDenomination === denomination}
+                    onClick={() => handleDenominationChange(denomination)}
+                  >
+                    Bs {denomination}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {isCameraActive && (
@@ -1633,8 +1695,8 @@ export default function App() {
                     <h2>Billete Válido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
                     <p>
-                      El número {result.serialDisplay} no pertenece a los rangos
-                      reportados por el BCB.
+                      El número {result.serialDisplay} no pertenece a los rangos reportados por el
+                      BCB para billetes de Bs {selectedDenomination}.
                     </p>
                   </>
                 ) : (
@@ -1643,8 +1705,8 @@ export default function App() {
                     <h2>Billete Inválido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
                     <p>
-                      ¡Cuidado! El número {result.serialDisplay} pertenece a un lote reportado robado
-                      por el BCB.
+                      ¡Cuidado! El número {result.serialDisplay} pertenece a un lote reportado
+                      robado por el BCB para billetes de Bs {selectedDenomination}.
                     </p>
                   </>
                 )}
