@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import * as ocr from '@paddlejs-models/ocr';
 import { Camera, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 
 const DETECTION_MODEL_PATH =
@@ -57,7 +56,7 @@ const validRanges = [
   [109400001, 109850000],
 ];
 
-type OcrStatus = 'initializing' | 'ready' | 'error';
+type OcrStatus = 'idle' | 'initializing' | 'ready' | 'error';
 type CandidateSource = 'single-token' | 'adjacent-join' | 'fallback';
 type OcrPoint = [number, number];
 type OcrBox = [OcrPoint, OcrPoint, OcrPoint, OcrPoint];
@@ -65,6 +64,19 @@ type OcrBox = [OcrPoint, OcrPoint, OcrPoint, OcrPoint];
 type OcrResponse = {
   text?: unknown;
   points?: unknown;
+};
+
+type OcrModule = {
+  init: (detectionModelPath?: string, recognitionModelPath?: string) => Promise<unknown>;
+  recognize: (source: OcrCompatibleCanvas) => Promise<OcrResponse | null>;
+};
+
+type TorchSettings = {
+  torch?: boolean;
+};
+
+type TorchCapableTrack = MediaStreamTrack & {
+  getCapabilities?: () => MediaTrackCapabilities & TorchSettings;
 };
 
 type SerialCandidate = {
@@ -132,6 +144,21 @@ class OcrTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`El OCR tardó demasiado en responder (${timeoutMs} ms).`);
     this.name = 'OcrTimeoutError';
+  }
+}
+
+let ocrModulePromise: Promise<OcrModule> | null = null;
+
+async function loadOcrModule() {
+  if (!ocrModulePromise) {
+    ocrModulePromise = import('@paddlejs-models/ocr') as Promise<OcrModule>;
+  }
+
+  try {
+    return await ocrModulePromise;
+  } catch (error) {
+    ocrModulePromise = null;
+    throw error;
   }
 }
 
@@ -839,7 +866,7 @@ function createPreparedCanvasVariant(
 }
 
 export default function App() {
-  const [ocrStatus, setOcrStatus] = useState<OcrStatus>('initializing');
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus>('idle');
   const [ocrInitError, setOcrInitError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
@@ -847,9 +874,13 @@ export default function App() {
   const [scanFeedback, setScanFeedback] = useState<ScanFeedback>('none');
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
+  const [isTorchAvailable, setIsTorchAvailable] = useState(false);
+  const [isTorchEnabled, setIsTorchEnabled] = useState(false);
+  const [isTogglingTorch, setIsTogglingTorch] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const isOcrInitialized = useRef(false);
+  const ocrModuleRef = useRef<OcrModule | null>(null);
+  const ocrInitPromiseRef = useRef<Promise<void> | null>(null);
   const activeJobRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
   const compactImageModeRef = useRef(false);
@@ -875,6 +906,42 @@ export default function App() {
     setScanFeedback('none');
   };
 
+  const getActiveVideoTrack = () => {
+    const stream = streamRef.current;
+    if (!stream) {
+      return null;
+    }
+
+    return (stream.getVideoTracks()[0] as TorchCapableTrack | undefined) ?? null;
+  };
+
+  const supportsTorchControl = (track: TorchCapableTrack | null) => {
+    if (!track || typeof track.getCapabilities !== 'function') {
+      return false;
+    }
+
+    const supportedConstraints = navigator.mediaDevices?.getSupportedConstraints?.() as
+      | (MediaTrackSupportedConstraints & TorchSettings)
+      | undefined;
+    if (!supportedConstraints?.torch) {
+      return false;
+    }
+
+    const capabilities = track.getCapabilities() as MediaTrackCapabilities & TorchSettings;
+    return Boolean(capabilities?.torch);
+  };
+
+  const syncTorchAvailability = () => {
+    const track = getActiveVideoTrack();
+    const supportsTorch = supportsTorchControl(track);
+
+    setIsTorchAvailable(supportsTorch);
+    if (!supportsTorch) {
+      setIsTorchEnabled(false);
+      setIsTogglingTorch(false);
+    }
+  };
+
   const stopCamera = () => {
     const stream = streamRef.current;
     if (stream) {
@@ -890,13 +957,95 @@ export default function App() {
 
     setIsCameraActive(false);
     setIsStartingCamera(false);
+    setIsTorchAvailable(false);
+    setIsTorchEnabled(false);
+    setIsTogglingTorch(false);
+  };
+
+  const toggleTorch = async () => {
+    const track = getActiveVideoTrack();
+    const supportsTorch = supportsTorchControl(track);
+
+    if (!track || !supportsTorch || isTogglingTorch) {
+      return;
+    }
+
+    setIsTogglingTorch(true);
+    const nextTorchState = !isTorchEnabled;
+
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: nextTorchState } as MediaTrackConstraintSet & TorchSettings],
+      } as MediaTrackConstraints);
+      setIsTorchEnabled(nextTorchState);
+      setCameraError(null);
+    } catch (error) {
+      console.error('Error al cambiar el flash:', error);
+      setCameraError('No se pudo cambiar el flash de la cámara.');
+    } finally {
+      setIsTogglingTorch(false);
+    }
+  };
+
+  const ensureOcrReady = async () => {
+    if (ocrModuleRef.current) {
+      if (ocrStatus !== 'ready') {
+        setOcrStatus('ready');
+      }
+      return ocrModuleRef.current;
+    }
+
+    if (ocrInitPromiseRef.current) {
+      await ocrInitPromiseRef.current;
+      if (!ocrModuleRef.current) {
+        throw new Error('OCR no disponible.');
+      }
+      return ocrModuleRef.current;
+    }
+
+    setOcrStatus('initializing');
+    setOcrInitError(null);
+
+    const initPromise = (async () => {
+      const ocrModule = await loadOcrModule();
+      await ocrModule.init(DETECTION_MODEL_PATH, RECOGNITION_MODEL_PATH);
+      ocrModuleRef.current = ocrModule;
+      setOcrStatus('ready');
+    })();
+
+    ocrInitPromiseRef.current = initPromise;
+
+    try {
+      await initPromise;
+      if (!ocrModuleRef.current) {
+        throw new Error('OCR no disponible.');
+      }
+
+      return ocrModuleRef.current;
+    } catch (error) {
+      console.error('Error al inicializar OCR:', error);
+      ocrModuleRef.current = null;
+      setOcrStatus('error');
+      setOcrInitError(
+        error instanceof Error
+          ? error.message
+          : 'No se pudo inicializar el motor OCR en este dispositivo.',
+      );
+      throw error;
+    } finally {
+      if (ocrInitPromiseRef.current === initPromise) {
+        ocrInitPromiseRef.current = null;
+      }
+
+    }
   };
 
   const runRecognitionPass = async (
     sourceCanvas: OcrCompatibleCanvas,
   ): Promise<RecognitionPassResult> => {
+    const ocrModule = ocrModuleRef.current ?? (await ensureOcrReady());
     const response = await withTimeout(
-      async () => (await ocr.recognize(sourceCanvas)) as OcrResponse | null,
+      async () => (await ocrModule.recognize(sourceCanvas)) as OcrResponse | null,
       OCR_RECOGNITION_TIMEOUT_MS,
     );
     const tokens = Array.isArray(response?.text)
@@ -1022,6 +1171,7 @@ export default function App() {
     if (streamRef.current) {
       setCameraError(null);
       setIsCameraActive(true);
+      syncTorchAvailability();
       return;
     }
 
@@ -1045,6 +1195,8 @@ export default function App() {
 
       streamRef.current = stream;
       setIsCameraActive(true);
+      setIsTorchEnabled(false);
+      syncTorchAvailability();
     } catch (error) {
       console.error('Error al abrir la cámara:', error);
       setCameraError('No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.');
@@ -1091,37 +1243,9 @@ export default function App() {
 
     const blob = await canvasToBlob(captureCanvas);
 
-    video.pause();
+    stopCamera();
     beginScanFromCapture(captureCanvas, blob);
   };
-
-  const initOcr = async () => {
-    if (isOcrInitialized.current) {
-      return;
-    }
-
-    isOcrInitialized.current = true;
-    setOcrStatus('initializing');
-    setOcrInitError(null);
-
-    try {
-      await ocr.init(DETECTION_MODEL_PATH, RECOGNITION_MODEL_PATH);
-      setOcrStatus('ready');
-    } catch (error) {
-      console.error('Error al inicializar OCR:', error);
-      isOcrInitialized.current = false;
-      setOcrStatus('error');
-      setOcrInitError(
-        error instanceof Error
-          ? error.message
-          : 'No se pudo inicializar el motor OCR en este dispositivo.',
-      );
-    }
-  };
-
-  useEffect(() => {
-    void initOcr();
-  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1170,24 +1294,24 @@ export default function App() {
   return (
     <div className="container">
       <main className="content">
-        {ocrStatus === 'initializing' ? (
+        {ocrStatus === 'initializing' && !isCameraActive ? (
           <div className="status-box initializing">
             <Loader2 className="spinner" size={32} />
             <p>
-              Inicializando OCR
+              Cargando lector OCR
               <br />
               <small>La primera carga puede tardar unos segundos</small>
             </p>
           </div>
-        ) : ocrStatus === 'error' ? (
+        ) : ocrStatus === 'error' && !isCameraActive ? (
           <div className="status-box initializing">
             <XCircle size={32} className="icon-invalid" />
             <p>
-              No se pudo inicializar el OCR
+              No se pudo cargar el lector OCR
               <br />
               <small>{ocrInitError ?? 'Intenta nuevamente.'}</small>
             </p>
-            <button className="primary-btn" onClick={() => void initOcr()}>
+            <button className="primary-btn" onClick={() => void ensureOcrReady()}>
               Reintentar
             </button>
           </div>
@@ -1197,8 +1321,9 @@ export default function App() {
               <span className="camera-badge">Recomendado</span>
               <h2>Captura guiada del serial</h2>
               <p>
-                Coloca solo el número de serie dentro del recuadro. Puedes dejar la cámara abierta
-                y seguir tomando fotos para revisar varios billetes seguidos.
+                Coloca solo el número de serie dentro del recuadro. La app toma una captura y
+                libera la cámara antes de analizarla para evitar cierres del navegador en
+                teléfonos.
               </p>
             </div>
 
@@ -1207,27 +1332,13 @@ export default function App() {
                 <div className="camera-stage">
                   <video
                     ref={videoRef}
-                    className={`camera-video ${isProcessing && imageSrc ? 'camera-video-hidden' : ''}`}
+                    className="camera-video"
                     autoPlay
                     muted
                     playsInline
                   />
-                  {isProcessing && imageSrc && (
-                    <img
-                      src={imageSrc}
-                      alt="Última captura del serial"
-                      className="camera-still"
-                    />
-                  )}
                   <div className="camera-guide" />
                   <div className="camera-guide-label">Alinea el número de serie aquí</div>
-
-                  {isProcessing && (
-                    <div className="processing-overlay">
-                      <Loader2 className="spinner" size={42} />
-                      <span>Escaneando serial...</span>
-                    </div>
-                  )}
                 </div>
               </div>
             )}
@@ -1256,6 +1367,21 @@ export default function App() {
                       : 'Abrir cámara guiada'}
                 </span>
               </button>
+
+              {isCameraActive && isTorchAvailable && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={isProcessing || isTogglingTorch}
+                  onClick={() => void toggleTorch()}
+                >
+                  {isTogglingTorch
+                    ? 'Cambiando flash...'
+                    : isTorchEnabled
+                      ? 'Apagar flash'
+                      : 'Encender flash'}
+                </button>
+              )}
 
               {isCameraActive && (
                 <button
