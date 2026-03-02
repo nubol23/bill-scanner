@@ -263,6 +263,19 @@ body {
   object-fit: cover;
 }
 
+.camera-video-hidden {
+  opacity: 0;
+}
+
+.camera-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
 .camera-guide {
   position: absolute;
   top: 41%;
