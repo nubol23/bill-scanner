@@ -872,7 +872,6 @@ export default function App() {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const isOcrInitialized = useRef(false);
   const activeJobRef = useRef(0);
@@ -1061,7 +1060,7 @@ export default function App() {
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError('Tu navegador no permite abrir la cámara. Usa la opción de subir foto.');
+      setCameraError('Tu navegador no permite abrir la cámara.');
       return;
     }
 
@@ -1082,7 +1081,7 @@ export default function App() {
       setIsCameraActive(true);
     } catch (error) {
       console.error('Error al abrir la cámara:', error);
-      setCameraError('No se pudo abrir la cámara. Revisa los permisos o usa la opción de subir foto.');
+      setCameraError('No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.');
     } finally {
       setIsStartingCamera(false);
     }
@@ -1108,7 +1107,7 @@ export default function App() {
     if (!context) {
       canvas.width = 0;
       canvas.height = 0;
-      setCameraError('No se pudo preparar la captura. Usa la opción de subir foto.');
+      setCameraError('No se pudo preparar la captura. Intenta de nuevo.');
       return;
     }
 
@@ -1136,6 +1135,7 @@ export default function App() {
       return;
     }
 
+    video.pause();
     beginScanFromBlob(blob, `serial-${Date.now()}.jpg`);
   };
 
@@ -1183,8 +1183,26 @@ export default function App() {
       video.srcObject = stream;
     }
 
+    if (isProcessing) {
+      video.pause();
+      return;
+    }
+
     void video.play().catch(noop);
-  }, [isCameraActive]);
+  }, [isCameraActive, isProcessing]);
+
+  useEffect(() => {
+    if (isProcessing || (results === null && scanFeedback === 'none')) {
+      return;
+    }
+
+    void waitForNextPaint(2).then(() => {
+      window.scrollTo({
+        top: document.documentElement.scrollHeight,
+        behavior: 'smooth',
+      });
+    });
+  }, [isProcessing, results, scanFeedback]);
 
   useEffect(() => {
     return () => {
@@ -1199,32 +1217,8 @@ export default function App() {
     };
   }, []);
 
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-
-    if (!file || isProcessing) {
-      return;
-    }
-
-    clearScanOutput();
-    setPreviewFromBlob(file);
-    setCameraError(null);
-    void processSelectedFile(file);
-  };
-
   return (
     <div className="container">
-      <header className="glass-header">
-        <h1>Escáner de Billetes</h1>
-        <p>Usa la cámara guiada para enfocar el serial o, si prefieres, sube una foto.</p>
-        <p className="header-note">
-          Si subes una imagen, intenta que sea recta, enfocada y centrada en el número de serie.
-          Esta app corre en tu propio dispositivo y usa un modelo pequeño, así que puede
-          confundirse cuando la foto está movida, oscura o con mucho fondo.
-        </p>
-      </header>
-
       <main className="content">
         {ocrStatus === 'initializing' ? (
           <div className="status-box initializing">
@@ -1258,25 +1252,23 @@ export default function App() {
               </p>
             </div>
 
-            <input
-              type="file"
-              accept="image/*"
-              disabled={isProcessing}
-              onChange={handleFileChange}
-              ref={fileInputRef}
-              className="hidden-input"
-            />
-
             {isCameraActive && (
               <div className="camera-stage-shell">
                 <div className="camera-stage">
                   <video
                     ref={videoRef}
-                    className="camera-video"
+                    className={`camera-video ${isProcessing && imageSrc ? 'camera-video-hidden' : ''}`}
                     autoPlay
                     muted
                     playsInline
                   />
+                  {isProcessing && imageSrc && (
+                    <img
+                      src={imageSrc}
+                      alt="Última captura del serial"
+                      className="camera-still"
+                    />
+                  )}
                   <div className="camera-guide" />
                   <div className="camera-guide-label">Alinea el número de serie aquí</div>
 
@@ -1325,15 +1317,6 @@ export default function App() {
                   Cerrar cámara
                 </button>
               )}
-
-              <button
-                type="button"
-                className="ghost-btn"
-                disabled={isProcessing || isStartingCamera}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                Subir foto
-              </button>
             </div>
           </section>
         )}
@@ -1403,6 +1386,10 @@ export default function App() {
       </main>
 
       <footer className="footer-copyright">
+        <p className="footer-note">
+          Esta app corre en tu propio dispositivo y usa un modelo pequeño, así que puede
+          confundirse cuando la foto está movida u oscura.
+        </p>
         <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
           © {new Date().getFullYear()} nubol23
         </a>
