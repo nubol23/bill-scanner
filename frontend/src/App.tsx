@@ -1093,20 +1093,20 @@ export default function App() {
                 {result.isValid ? (
                   <>
                     <CheckCircle2 size={48} className="icon-valid" />
-                    <h2>Billete Válido</h2>
+                    <h2>Billete de Bs {selectedDenomination} Válido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
                     <p>
-                      El número {result.serialDisplay} no pertenece a los rangos reportados por el
+                      No pertenece a los rangos reportados por el
                       BCB para billetes de Bs {selectedDenomination}.
                     </p>
                   </>
                 ) : (
                   <>
                     <XCircle size={48} className="icon-invalid" />
-                    <h2>Billete Inválido</h2>
+                    <h2>Billete de Bs {selectedDenomination} Inválido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
                     <p>
-                      ¡Cuidado! El número {result.serialDisplay} pertenece a un lote reportado
+                      ¡Cuidado! Pertenece a un lote reportado
                       robado por el BCB para billetes de Bs {selectedDenomination}.
                     </p>
                   </>
