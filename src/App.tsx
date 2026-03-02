@@ -9,6 +9,8 @@ const RECOGNITION_MODEL_PATH =
 const DEFAULT_MAX_DIMENSION = 1280;
 const COMPACT_MAX_DIMENSION = 960;
 const MOBILE_MAX_VIEWPORT_WIDTH = 768;
+const CAMERA_FRAME_WIDTH_RATIO = 0.78;
+const CAMERA_FRAME_HEIGHT_RATIO = 0.18;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
 const FALLBACK_FILTER = 'grayscale(100%) contrast(1.18) brightness(1.05)';
 const DENOMINATION_VALUES = ['200', '100', '50', '20', '10'] as const;
@@ -106,9 +108,18 @@ type PreparedImage = {
   revoke: () => void;
 };
 
+type ScanFeedback = 'none' | 'not-found' | 'low-confidence';
+
 type RecognitionPassResult = {
   tokens: string[];
+  candidates: SerialCandidate[];
   results: SerialResult[];
+};
+
+type SerialScanOutcome = {
+  tokens: string[];
+  results: SerialResult[];
+  feedback: ScanFeedback;
 };
 
 const noop = () => undefined;
@@ -288,6 +299,78 @@ function looksLikeMemoryError(error: unknown) {
   return ['memory', 'webgl', 'context', 'texture', 'quota', 'allocation'].some((hint) =>
     message.includes(hint),
   );
+}
+
+function getCaptureGuideRect(width: number, height: number) {
+  const guideWidth = Math.max(1, Math.round(width * CAMERA_FRAME_WIDTH_RATIO));
+  const guideHeight = Math.max(1, Math.round(height * CAMERA_FRAME_HEIGHT_RATIO));
+
+  return {
+    x: Math.max(0, Math.round((width - guideWidth) / 2)),
+    y: Math.max(0, Math.round((height - guideHeight) / 2)),
+    width: guideWidth,
+    height: guideHeight,
+  };
+}
+
+function waitForNextPaint(frames = 1) {
+  return new Promise<void>((resolve) => {
+    const nextFrame = (remainingFrames: number) => {
+      if (remainingFrames <= 0) {
+        resolve();
+        return;
+      }
+
+      window.requestAnimationFrame(() => nextFrame(remainingFrames - 1));
+    };
+
+    nextFrame(frames);
+  });
+}
+
+function mergeConfirmedCandidates(
+  primaryCandidates: SerialCandidate[],
+  fallbackCandidates: SerialCandidate[],
+) {
+  const fallbackBySerial = new Map(
+    fallbackCandidates.map((candidate) => [candidate.serialDisplay, candidate]),
+  );
+  const confirmed: SerialCandidate[] = [];
+
+  for (const primaryCandidate of primaryCandidates) {
+    const fallbackCandidate = fallbackBySerial.get(primaryCandidate.serialDisplay);
+    if (!fallbackCandidate) {
+      continue;
+    }
+
+    confirmed.push({
+      serialDisplay: primaryCandidate.serialDisplay,
+      source:
+        getSourcePriority(primaryCandidate.source) >= getSourcePriority(fallbackCandidate.source)
+          ? primaryCandidate.source
+          : fallbackCandidate.source,
+      segmentIndexes: Array.from(
+        new Set([...primaryCandidate.segmentIndexes, ...fallbackCandidate.segmentIndexes]),
+      ),
+      confidence: clamp(
+        Math.round((primaryCandidate.confidence + fallbackCandidate.confidence) / 2) + 10,
+        1,
+        200,
+      ),
+    });
+  }
+
+  return confirmed.sort((left, right) => {
+    if (right.confidence !== left.confidence) {
+      return right.confidence - left.confidence;
+    }
+
+    if (right.serialDisplay.length !== left.serialDisplay.length) {
+      return right.serialDisplay.length - left.serialDisplay.length;
+    }
+
+    return getSourcePriority(right.source) - getSourcePriority(left.source);
+  });
 }
 
 function buildOcrSegments(tokens: string[], rawPoints: unknown) {
@@ -785,29 +868,68 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [results, setResults] = useState<SerialResult[] | null>(null);
-  const [recognizedTexts, setRecognizedTexts] = useState<string[]>([]);
+  const [scanFeedback, setScanFeedback] = useState<ScanFeedback>('none');
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isStartingCamera, setIsStartingCamera] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const isOcrInitialized = useRef(false);
   const activeJobRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
   const compactImageModeRef = useRef(false);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const setPreviewFromBlob = (blob: Blob) => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+
+    const previewUrl = URL.createObjectURL(blob);
+    previewUrlRef.current = previewUrl;
+    setImageSrc(previewUrl);
+  };
+
+  const clearScanOutput = () => {
+    setResults(null);
+    setScanFeedback('none');
+  };
+
+  const stopCamera = () => {
+    const stream = streamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    const video = videoRef.current;
+    if (video) {
+      video.pause();
+      video.srcObject = null;
+    }
+
+    setIsCameraActive(false);
+    setIsStartingCamera(false);
+  };
 
   const runRecognitionPass = async (image: HTMLImageElement): Promise<RecognitionPassResult> => {
     const response = (await ocr.recognize(image)) as OcrResponse | null;
     const tokens = Array.isArray(response?.text)
       ? response.text.filter((token): token is string => typeof token === 'string')
       : [];
+    const candidates = extractSerialCandidates(tokens, response?.points);
 
     return {
       tokens,
-      results: toSerialResults(extractSerialCandidates(tokens, response?.points)),
+      candidates,
+      results: toSerialResults(candidates),
     };
   };
 
-  const runPassesForDimension = async (
+  const runConfirmedScan = async (
     sourceImage: HTMLImageElement,
     maxDimension: number,
-  ): Promise<RecognitionPassResult> => {
+  ): Promise<SerialScanOutcome> => {
     const primaryImage = await createPreparedImageVariant(sourceImage, {
       maxDimension,
       filter: null,
@@ -815,14 +937,12 @@ export default function App() {
 
     let primaryPass: RecognitionPassResult = {
       tokens: [],
+      candidates: [],
       results: [],
     };
 
     try {
       primaryPass = await runRecognitionPass(primaryImage.image);
-      if (primaryPass.results.length > 0) {
-        return primaryPass;
-      }
     } finally {
       primaryImage.revoke();
     }
@@ -832,16 +952,33 @@ export default function App() {
       filter: FALLBACK_FILTER,
     });
 
+    let fallbackPass: RecognitionPassResult = {
+      tokens: [],
+      candidates: [],
+      results: [],
+    };
+
     try {
-      const fallbackPass = await runRecognitionPass(fallbackImage.image);
-      if (fallbackPass.results.length > 0 || fallbackPass.tokens.length > 0) {
-        return fallbackPass;
-      }
+      fallbackPass = await runRecognitionPass(fallbackImage.image);
     } finally {
       fallbackImage.revoke();
     }
 
-    return primaryPass;
+    const confirmedCandidates = mergeConfirmedCandidates(
+      primaryPass.candidates,
+      fallbackPass.candidates,
+    );
+
+    return {
+      tokens: Array.from(new Set([...primaryPass.tokens, ...fallbackPass.tokens])),
+      results: toSerialResults(confirmedCandidates),
+      feedback:
+        confirmedCandidates.length > 0
+          ? 'none'
+          : primaryPass.candidates.length > 0 || fallbackPass.candidates.length > 0
+            ? 'low-confidence'
+            : 'not-found',
+    };
   };
 
   const processSelectedFile = async (file: File) => {
@@ -851,6 +988,7 @@ export default function App() {
     setIsProcessing(true);
 
     try {
+      await waitForNextPaint(2);
       sourceImage = await loadImageFromUrl(sourceUrl);
       if (activeJobRef.current !== jobId) {
         return;
@@ -861,13 +999,13 @@ export default function App() {
           ? COMPACT_MAX_DIMENSION
           : DEFAULT_MAX_DIMENSION;
 
-      let passResult: RecognitionPassResult;
+      let scanOutcome: SerialScanOutcome;
       try {
-        passResult = await runPassesForDimension(sourceImage, initialMaxDimension);
+        scanOutcome = await runConfirmedScan(sourceImage, initialMaxDimension);
       } catch (error) {
         if (initialMaxDimension !== COMPACT_MAX_DIMENSION && looksLikeMemoryError(error)) {
           compactImageModeRef.current = true;
-          passResult = await runPassesForDimension(sourceImage, COMPACT_MAX_DIMENSION);
+          scanOutcome = await runConfirmedScan(sourceImage, COMPACT_MAX_DIMENSION);
         } else {
           throw error;
         }
@@ -877,16 +1015,16 @@ export default function App() {
         return;
       }
 
-      setRecognizedTexts(passResult.tokens);
-      setResults(passResult.results.length > 0 ? passResult.results : []);
+      setResults(scanOutcome.results);
+      setScanFeedback(scanOutcome.feedback);
     } catch (error) {
       if (activeJobRef.current !== jobId) {
         return;
       }
 
       console.error('Error de OCR:', error);
-      setRecognizedTexts([]);
       setResults(null);
+      setScanFeedback('none');
     } finally {
       URL.revokeObjectURL(sourceUrl);
       if (sourceImage) {
@@ -897,6 +1035,108 @@ export default function App() {
         setIsProcessing(false);
       }
     }
+  };
+
+  const beginScanFromBlob = (blob: Blob, fileName: string) => {
+    clearScanOutput();
+    setPreviewFromBlob(blob);
+    setCameraError(null);
+
+    const file = new File([blob], fileName, {
+      type: blob.type || 'image/jpeg',
+    });
+
+    void processSelectedFile(file);
+  };
+
+  const startCamera = async () => {
+    if (isProcessing || isStartingCamera) {
+      return;
+    }
+
+    if (streamRef.current) {
+      setCameraError(null);
+      setIsCameraActive(true);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError('Tu navegador no permite abrir la cámara. Usa la opción de subir foto.');
+      return;
+    }
+
+    setIsStartingCamera(true);
+    setCameraError(null);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+      setIsCameraActive(true);
+    } catch (error) {
+      console.error('Error al abrir la cámara:', error);
+      setCameraError('No se pudo abrir la cámara. Revisa los permisos o usa la opción de subir foto.');
+    } finally {
+      setIsStartingCamera(false);
+    }
+  };
+
+  const captureCameraFrame = async () => {
+    if (isProcessing) {
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setCameraError('La cámara todavía se está preparando. Intenta de nuevo en un segundo.');
+      return;
+    }
+
+    const guideRect = getCaptureGuideRect(video.videoWidth, video.videoHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = guideRect.width;
+    canvas.height = guideRect.height;
+    const context = canvas.getContext('2d');
+
+    if (!context) {
+      canvas.width = 0;
+      canvas.height = 0;
+      setCameraError('No se pudo preparar la captura. Usa la opción de subir foto.');
+      return;
+    }
+
+    context.drawImage(
+      video,
+      guideRect.x,
+      guideRect.y,
+      guideRect.width,
+      guideRect.height,
+      0,
+      0,
+      guideRect.width,
+      guideRect.height,
+    );
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, 'image/jpeg', DERIVATIVE_JPEG_QUALITY);
+    });
+
+    canvas.width = 0;
+    canvas.height = 0;
+
+    if (!blob) {
+      setCameraError('No se pudo capturar la foto. Intenta de nuevo.');
+      return;
+    }
+
+    beginScanFromBlob(blob, `serial-${Date.now()}.jpg`);
   };
 
   const initOcr = async () => {
@@ -932,10 +1172,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+
+    if (!isCameraActive || !video || !stream) {
+      return;
+    }
+
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+
+    void video.play().catch(noop);
+  }, [isCameraActive]);
+
+  useEffect(() => {
     return () => {
       activeJobRef.current += 1;
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current);
+      }
+      const stream = streamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
       }
     };
   }, []);
@@ -948,16 +1207,9 @@ export default function App() {
       return;
     }
 
-    if (previewUrlRef.current) {
-      URL.revokeObjectURL(previewUrlRef.current);
-    }
-
-    const previewUrl = URL.createObjectURL(file);
-    previewUrlRef.current = previewUrl;
-    setImageSrc(previewUrl);
-    setResults(null);
-    setRecognizedTexts([]);
-
+    clearScanOutput();
+    setPreviewFromBlob(file);
+    setCameraError(null);
     void processSelectedFile(file);
   };
 
@@ -965,7 +1217,12 @@ export default function App() {
     <div className="container">
       <header className="glass-header">
         <h1>Escáner de Billetes</h1>
-        <p>Escanea tus billetes con la cámara o súbelos.</p>
+        <p>Usa la cámara guiada para enfocar el serial o, si prefieres, sube una foto.</p>
+        <p className="header-note">
+          Si subes una imagen, intenta que sea recta, enfocada y centrada en el número de serie.
+          Esta app corre en tu propio dispositivo y usa un modelo pequeño, así que puede
+          confundirse cuando la foto está movida, oscura o con mucho fondo.
+        </p>
       </header>
 
       <main className="content">
@@ -991,7 +1248,16 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <div className="upload-container">
+          <section className="camera-card">
+            <div className="camera-copy">
+              <span className="camera-badge">Recomendado</span>
+              <h2>Captura guiada del serial</h2>
+              <p>
+                Coloca solo el número de serie dentro del recuadro. Puedes dejar la cámara abierta
+                y seguir tomando fotos para revisar varios billetes seguidos.
+              </p>
+            </div>
+
             <input
               type="file"
               accept="image/*"
@@ -1000,26 +1266,86 @@ export default function App() {
               ref={fileInputRef}
               className="hidden-input"
             />
-            <button
-              type="button"
-              className="primary-btn"
-              disabled={isProcessing}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Camera size={24} />
-              <span>Capturar / Subir Billete</span>
-            </button>
-          </div>
+
+            {isCameraActive && (
+              <div className="camera-stage-shell">
+                <div className="camera-stage">
+                  <video
+                    ref={videoRef}
+                    className="camera-video"
+                    autoPlay
+                    muted
+                    playsInline
+                  />
+                  <div className="camera-guide" />
+                  <div className="camera-guide-label">Alinea el número de serie aquí</div>
+
+                  {isProcessing && (
+                    <div className="processing-overlay">
+                      <Loader2 className="spinner" size={42} />
+                      <span>Escaneando serial...</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {cameraError && <p className="camera-error">{cameraError}</p>}
+
+            <div className="camera-actions">
+              <button
+                type="button"
+                className="primary-btn"
+                disabled={isProcessing || isStartingCamera}
+                onClick={() => {
+                  if (isCameraActive) {
+                    void captureCameraFrame();
+                  } else {
+                    void startCamera();
+                  }
+                }}
+              >
+                <Camera size={20} />
+                <span>
+                  {isCameraActive
+                    ? 'Tomar foto del serial'
+                    : isStartingCamera
+                      ? 'Abriendo cámara...'
+                      : 'Abrir cámara guiada'}
+                </span>
+              </button>
+
+              {isCameraActive && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={isProcessing}
+                  onClick={stopCamera}
+                >
+                  Cerrar cámara
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="ghost-btn"
+                disabled={isProcessing || isStartingCamera}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                Subir foto
+              </button>
+            </div>
+          </section>
         )}
 
         {imageSrc && (
           <div className="preview-card">
             <img key={imageSrc} src={imageSrc} alt="Billete escaneado" className="scanned-image" />
 
-            {isProcessing && (
+            {isProcessing && !isCameraActive && (
               <div className="processing-overlay">
                 <Loader2 className="spinner" size={48} />
-                <span>Escaneando números...</span>
+                <span>Escaneando serial...</span>
               </div>
             )}
           </div>
@@ -1058,11 +1384,20 @@ export default function App() {
           </div>
         )}
 
-        {!isProcessing && results !== null && results.length === 0 && recognizedTexts.length > 0 && (
+        {!isProcessing && results !== null && results.length === 0 && scanFeedback === 'low-confidence' && (
+          <div className="result-card invalid">
+            <XCircle size={48} className="icon-invalid" />
+            <h2>Lectura incierta</h2>
+            <p>No se pudo leer con suficiente confianza el número de serie.</p>
+            <p>Vuelve a intentar con el serial más cerca, mejor enfocado y dentro del recuadro.</p>
+          </div>
+        )}
+
+        {!isProcessing && results !== null && results.length === 0 && scanFeedback === 'not-found' && (
           <div className="result-card invalid">
             <XCircle size={48} className="icon-invalid" />
             <h2>Patrón no encontrado</h2>
-            <p>No se detectó ningún número de 8 a 9 dígitos en la imagen.</p>
+            <p>No se detectó un número de serie de 8 a 9 dígitos en la imagen capturada.</p>
           </div>
         )}
       </main>
