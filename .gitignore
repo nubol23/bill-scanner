@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+backend/.venv/
+backend/.pytest_cache/
+backend/DEPLOYMENT.local.md
 
 # Editor directories and files
 .vscode/*

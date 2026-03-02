@@ -1,0 +1,23 @@
+[project]
+name = "billete-ocr-backend"
+version = "0.1.0"
+description = "Server-side OCR for Bolivian bill serials."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "httpx>=0.28.0,<1.0.0",
+  "numpy>=2.3.0,<3.0.0",
+  "onnxruntime>=1.22.0,<2.0.0",
+  "pillow>=11.3.0,<12.0.0",
+  "python-multipart>=0.0.20,<1.0.0",
+  "uvicorn>=0.35.0,<1.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0,<9.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

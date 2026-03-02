@@ -1,0 +1,12 @@
+{
+  "engine_name": "en_PP-OCRv5_mobile_rec",
+  "input_height": 48,
+  "min_width": 320,
+  "channel_order": "BGR",
+  "mean": [0.5, 0.5, 0.5],
+  "std": [0.5, 0.5, 0.5],
+  "pad_value": 0.0,
+  "top_crop_ratio": 0.7,
+  "use_space_char": true,
+  "charset_path": "ppocr_keys_v1.txt"
+}
