@@ -16,15 +16,18 @@ if (!fs.existsSync(ocrBundlePath)) {
   process.exit(0);
 }
 
-const replacements = [
+const scalarRepairs = [
   {
-    from: 'h().warpPerspective(o,D,i,n,h().INTER_CUBIC,h().BORDER_REPLICATE,new(h().Scalar));',
-    to: '(function(A){h().warpPerspective(o,D,i,n,h().INTER_CUBIC,h().BORDER_REPLICATE,A),A.delete()})(new(h().Scalar));',
+    from: '(function(A){h().warpPerspective(o,D,i,n,h().INTER_CUBIC,h().BORDER_REPLICATE,A),A.delete()})(new(h().Scalar));',
+    to: 'h().warpPerspective(o,D,i,n,h().INTER_CUBIC,h().BORDER_REPLICATE,new(h().Scalar));',
   },
   {
-    from: 'h().warpAffine(D,t,F,s,h().INTER_CUBIC,h().BORDER_REPLICATE,new(h().Scalar))',
-    to: '(function(A){h().warpAffine(D,t,F,s,h().INTER_CUBIC,h().BORDER_REPLICATE,A),A.delete()})(new(h().Scalar))',
+    from: '(function(A){h().warpAffine(D,t,F,s,h().INTER_CUBIC,h().BORDER_REPLICATE,A),A.delete()})(new(h().Scalar))',
+    to: 'h().warpAffine(D,t,F,s,h().INTER_CUBIC,h().BORDER_REPLICATE,new(h().Scalar))',
   },
+];
+
+const cleanupPatches = [
   {
     from: 'M.width=r.matSize[1],M.height=r.matSize[0],h().imshow(M,r),o.delete(),D.delete(),r.delete(),Q.delete(),E.delete()',
     to: 'M.width=r.matSize[1],M.height=r.matSize[0],h().imshow(M,r),o.delete(),D.delete(),r.delete(),Q.delete(),E.delete(),i.delete(),n.delete(),N.delete(),t&&(F.delete(),w.delete(),s.delete())',
@@ -34,7 +37,16 @@ const replacements = [
 let bundleSource = fs.readFileSync(ocrBundlePath, 'utf8');
 let changed = false;
 
-for (const replacement of replacements) {
+for (const repair of scalarRepairs) {
+  if (!bundleSource.includes(repair.from)) {
+    continue;
+  }
+
+  bundleSource = bundleSource.replace(repair.from, repair.to);
+  changed = true;
+}
+
+for (const replacement of cleanupPatches) {
   if (bundleSource.includes(replacement.to)) {
     continue;
   }
