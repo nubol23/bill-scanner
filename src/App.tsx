@@ -71,14 +71,6 @@ type OcrModule = {
   recognize: (source: OcrCompatibleCanvas) => Promise<OcrResponse | null>;
 };
 
-type TorchSettings = {
-  torch?: boolean;
-};
-
-type TorchCapableTrack = MediaStreamTrack & {
-  getCapabilities?: () => MediaTrackCapabilities & TorchSettings;
-};
-
 type SerialCandidate = {
   serialDisplay: string;
   source: CandidateSource;
@@ -875,9 +867,6 @@ export default function App() {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
   const [isPreparingOcr, setIsPreparingOcr] = useState(false);
-  const [isTorchAvailable, setIsTorchAvailable] = useState(false);
-  const [isTorchEnabled, setIsTorchEnabled] = useState(false);
-  const [isTogglingTorch, setIsTogglingTorch] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const ocrModuleRef = useRef<OcrModule | null>(null);
@@ -907,32 +896,6 @@ export default function App() {
     setScanFeedback('none');
   };
 
-  const getActiveVideoTrack = () => {
-    const stream = streamRef.current;
-    if (!stream) {
-      return null;
-    }
-
-    return (stream.getVideoTracks()[0] as TorchCapableTrack | undefined) ?? null;
-  };
-
-  const syncTorchAvailability = () => {
-    const track = getActiveVideoTrack();
-    const capabilities =
-      track && typeof track.getCapabilities === 'function'
-        ? (track.getCapabilities() as MediaTrackCapabilities & TorchSettings)
-        : null;
-    const supportsTorch = Boolean(
-      track && capabilities?.torch,
-    );
-
-    setIsTorchAvailable(supportsTorch);
-    if (!supportsTorch) {
-      setIsTorchEnabled(false);
-      setIsTogglingTorch(false);
-    }
-  };
-
   const stopCamera = () => {
     const stream = streamRef.current;
     if (stream) {
@@ -948,40 +911,6 @@ export default function App() {
 
     setIsCameraActive(false);
     setIsStartingCamera(false);
-    setIsTorchAvailable(false);
-    setIsTorchEnabled(false);
-    setIsTogglingTorch(false);
-  };
-
-  const toggleTorch = async () => {
-    const track = getActiveVideoTrack();
-    const capabilities =
-      track && typeof track.getCapabilities === 'function'
-        ? (track.getCapabilities() as MediaTrackCapabilities & TorchSettings)
-        : null;
-    const supportsTorch = Boolean(
-      track && capabilities?.torch,
-    );
-
-    if (!track || !supportsTorch || isTogglingTorch) {
-      return;
-    }
-
-    setIsTogglingTorch(true);
-    const nextTorchState = !isTorchEnabled;
-
-    try {
-      await track.applyConstraints({
-        advanced: [{ torch: nextTorchState } as MediaTrackConstraintSet & TorchSettings],
-      } as MediaTrackConstraints);
-      setIsTorchEnabled(nextTorchState);
-      setCameraError(null);
-    } catch (error) {
-      console.error('Error al cambiar el flash:', error);
-      setCameraError('No se pudo cambiar el flash de la cámara.');
-    } finally {
-      setIsTogglingTorch(false);
-    }
   };
 
   const ensureOcrReady = async () => {
@@ -1170,7 +1099,6 @@ export default function App() {
     if (streamRef.current) {
       setCameraError(null);
       setIsCameraActive(true);
-      syncTorchAvailability();
       if (ocrStatus !== 'ready') {
         void ensureOcrReady().catch(() => {
           setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
@@ -1199,8 +1127,6 @@ export default function App() {
 
       streamRef.current = stream;
       setIsCameraActive(true);
-      setIsTorchEnabled(false);
-      syncTorchAvailability();
       void ensureOcrReady().catch(() => {
         setCameraError('No se pudo cargar el lector OCR. Intenta nuevamente.');
       });
@@ -1413,21 +1339,6 @@ export default function App() {
                       : 'Abrir cámara guiada'}
                 </span>
               </button>
-
-              {isCameraActive && isTorchAvailable && (
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  disabled={isProcessing || isTogglingTorch}
-                  onClick={() => void toggleTorch()}
-                >
-                  {isTogglingTorch
-                    ? 'Cambiando flash...'
-                    : isTorchEnabled
-                      ? 'Apagar flash'
-                      : 'Encender flash'}
-                </button>
-              )}
 
               {isCameraActive && (
                 <button
