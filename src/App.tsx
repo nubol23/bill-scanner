@@ -156,6 +156,28 @@ type LoadingProgressState = {
   detail?: string;
 };
 
+type CandidateVote = {
+  confidenceTotal: number;
+  hits: number;
+  maxConfidence: number;
+  source: SerialSource;
+};
+
+type AggregatedScanResult = {
+  serials: DetectedSerial[];
+  feedback: ScanFeedback;
+};
+
+type DiagnosticResult = {
+  fileName: string;
+  expected: string | null;
+  detected: string | null;
+  confidence: number | null;
+  feedback: ScanFeedback;
+  matched: boolean | null;
+  error: string | null;
+};
+
 const noop = () => undefined;
 
 function clampProgress(value: number) {
@@ -307,7 +329,7 @@ function estimateForegroundBounds(source: ImageBitmap) {
   const canvas = document.createElement('canvas');
   canvas.width = analysisWidth;
   canvas.height = analysisHeight;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
   if (!context) {
     releaseCanvas(canvas);
@@ -551,7 +573,7 @@ async function createCroppedBitmap(source: ImageBitmap, rect: CropRect) {
   const canvas = document.createElement('canvas');
   canvas.width = rect.width;
   canvas.height = rect.height;
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
   if (!context) {
     releaseCanvas(canvas);
@@ -615,6 +637,31 @@ function toSerialResults(serials: DetectedSerial[]) {
     .filter((result): result is SerialResult => result !== null);
 }
 
+function parseExpectedSerialFromFileName(fileName: string) {
+  const match = fileName.match(/(?:^|[^0-9])(\d{8,9})(?=\D|$)/);
+  return match?.[1] ?? null;
+}
+
+function getDiagnosticStatusLabel(result: DiagnosticResult) {
+  if (result.error) {
+    return result.error;
+  }
+
+  if (result.detected) {
+    return result.detected;
+  }
+
+  if (result.feedback === 'low-confidence') {
+    return 'Lectura incierta';
+  }
+
+  if (result.feedback === 'not-found') {
+    return 'Patrón no encontrado';
+  }
+
+  return 'Sin coincidencia';
+}
+
 function workerErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -627,6 +674,8 @@ export default function App() {
   const [ocrStatus, setOcrStatus] = useState<OcrStatus>('idle');
   const [ocrInitError, setOcrInitError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDiagnosticsVisible, setIsDiagnosticsVisible] = useState(false);
+  const [isDiagnosticsRunning, setIsDiagnosticsRunning] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [results, setResults] = useState<SerialResult[] | null>(null);
   const [scanFeedback, setScanFeedback] = useState<ScanFeedback>('none');
@@ -638,13 +687,21 @@ export default function App() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [warmupProgress, setWarmupProgress] = useState<LoadingProgressState | null>(null);
   const [scanProgress, setScanProgress] = useState<LoadingProgressState | null>(null);
+  const [diagnosticsProgress, setDiagnosticsProgress] = useState<LoadingProgressState | null>(
+    null,
+  );
+  const [diagnosticResults, setDiagnosticResults] = useState<DiagnosticResult[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const diagnosticInputRef = useRef<HTMLInputElement>(null);
   const warmupPromiseRef = useRef<Promise<void> | null>(null);
   const activeJobRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const footerTapCountRef = useRef(0);
+  const footerTapResetRef = useRef<number | null>(null);
+  const isBusy = isProcessing || isDiagnosticsRunning;
 
   function revokePreviewUrl() {
     if (previewUrlRef.current) {
@@ -664,6 +721,35 @@ export default function App() {
   function clearScanOutput() {
     setResults(null);
     setScanFeedback('none');
+  }
+
+  function clearFooterTapResetTimer() {
+    if (footerTapResetRef.current !== null) {
+      window.clearTimeout(footerTapResetRef.current);
+      footerTapResetRef.current = null;
+    }
+  }
+
+  function handleFooterNoteTap() {
+    clearFooterTapResetTimer();
+    footerTapCountRef.current += 1;
+
+    if (footerTapCountRef.current >= 5) {
+      footerTapCountRef.current = 0;
+      setIsDiagnosticsVisible((current) => !current);
+      return;
+    }
+
+    footerTapResetRef.current = window.setTimeout(() => {
+      footerTapCountRef.current = 0;
+      footerTapResetRef.current = null;
+    }, 1500);
+  }
+
+  function ensureActiveJob(jobId: number) {
+    if (activeJobRef.current !== jobId) {
+      throw new Error('Escaneo cancelado.');
+    }
   }
 
   function getActiveVideoTrack() {
@@ -788,15 +874,159 @@ export default function App() {
     return promise;
   }
 
-  async function runOcrScan(image: ImageBitmap, progressLabel: string, detail?: string) {
+  async function runOcrScan(
+    image: ImageBitmap,
+    progressLabel: string,
+    detail?: string,
+    updateProgress: (progress: LoadingProgressState | null) => void = setScanProgress,
+  ) {
     await warmupOcr();
-    setScanProgress({
+    updateProgress({
       progress: null,
       label: progressLabel,
       detail,
     });
     await waitForNextPaint(1);
     return scanWithPaddleOcr(image);
+  }
+
+  function consolidateDetectedSerials(
+    acceptedSerials: Map<string, DetectedSerial>,
+    candidateVotes: Map<string, CandidateVote>,
+    strongestFeedback: ScanFeedback,
+  ): AggregatedScanResult {
+    if (acceptedSerials.size > 0) {
+      return {
+        serials: [...acceptedSerials.values()].sort(
+          (left, right) => right.confidence - left.confidence,
+        ),
+        feedback: 'none',
+      };
+    }
+
+    const consensusSerials = [...candidateVotes.entries()]
+      .map(([value, vote]) => ({
+        value,
+        confidence: vote.confidenceTotal / vote.hits,
+        hits: vote.hits,
+        source: vote.source,
+      }))
+      .filter((vote) => vote.hits >= 2 && vote.confidence >= 0.5)
+      .sort((left, right) => right.confidence - left.confidence)
+      .map<DetectedSerial>((vote) => ({
+        value: vote.value,
+        confidence: vote.confidence,
+        source: vote.source,
+      }));
+
+    if (consensusSerials.length > 0) {
+      return {
+        serials: consensusSerials,
+        feedback: 'none',
+      };
+    }
+
+    return {
+      serials: [],
+      feedback: strongestFeedback === 'none' ? 'not-found' : strongestFeedback,
+    };
+  }
+
+  async function scanUploadCandidates(
+    sourceBitmap: ImageBitmap,
+    jobId: number,
+    updateProgress: (progress: LoadingProgressState | null) => void,
+    options?: {
+      previewFallback?: Blob;
+      onPreview?: (blob: Blob) => void;
+    },
+  ) {
+    const foregroundBounds = estimateForegroundBounds(sourceBitmap);
+    const uploadCandidates = getUploadCropCandidates(
+      sourceBitmap.width,
+      sourceBitmap.height,
+      foregroundBounds ?? undefined,
+    );
+    const candidates =
+      sourceBitmap.height <= 96 || sourceBitmap.width <= 320
+        ? uploadCandidates.filter((candidate) =>
+            ['foreground-bounds', 'strip-top-band', 'full-image'].includes(candidate.id),
+          )
+        : uploadCandidates;
+    let strongestFeedback: ScanFeedback = 'none';
+    const acceptedSerials = new Map<string, DetectedSerial>();
+    const candidateVotes = new Map<string, CandidateVote>();
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      ensureActiveJob(jobId);
+
+      const candidate = candidates[index];
+      updateProgress({
+        progress: null,
+        label: `Probando recorte ${index + 1} de ${candidates.length}`,
+        detail: candidate.label,
+      });
+
+      let imageBitmap: ImageBitmap | null = null;
+
+      try {
+        const cropped = await createCroppedBitmap(sourceBitmap, candidate.rect);
+        imageBitmap = cropped.imageBitmap;
+
+        const previewBlob = cropped.previewBlob ?? options?.previewFallback;
+        if (previewBlob && options?.onPreview) {
+          options.onPreview(previewBlob);
+        }
+
+        const scan = await runOcrScan(
+          imageBitmap,
+          `Analizando recorte ${index + 1} de ${candidates.length}`,
+          candidate.label,
+          updateProgress,
+        );
+
+        ensureActiveJob(jobId);
+
+        for (const serial of scan.serials) {
+          const current = acceptedSerials.get(serial.value);
+          if (!current || serial.confidence > current.confidence) {
+            acceptedSerials.set(serial.value, serial);
+          }
+        }
+
+        for (const candidateSerial of scan.candidateSerials) {
+          const current = candidateVotes.get(candidateSerial.value);
+
+          if (!current) {
+            candidateVotes.set(candidateSerial.value, {
+              confidenceTotal: candidateSerial.confidence,
+              hits: 1,
+              maxConfidence: candidateSerial.confidence,
+              source: candidateSerial.source,
+            });
+            continue;
+          }
+
+          current.confidenceTotal += candidateSerial.confidence;
+          current.hits += 1;
+          current.maxConfidence = Math.max(current.maxConfidence, candidateSerial.confidence);
+
+          if (candidateSerial.confidence >= current.maxConfidence) {
+            current.source = candidateSerial.source;
+          }
+        }
+
+        if (scan.feedback === 'low-confidence') {
+          strongestFeedback = 'low-confidence';
+        } else if (strongestFeedback === 'none') {
+          strongestFeedback = scan.feedback;
+        }
+      } finally {
+        imageBitmap?.close();
+      }
+    }
+
+    return consolidateDetectedSerials(acceptedSerials, candidateVotes, strongestFeedback);
   }
 
   async function processCapturedBitmap(imageBitmap: ImageBitmap) {
@@ -864,7 +1094,7 @@ export default function App() {
   }
 
   async function processUploadedImage(file: File) {
-    if (isProcessing) {
+    if (isBusy) {
       return;
     }
 
@@ -889,141 +1119,24 @@ export default function App() {
 
     try {
       sourceBitmap = await createImageBitmap(file);
-      if (activeJobRef.current !== jobId) {
-        return;
-      }
+      ensureActiveJob(jobId);
 
-      const foregroundBounds = estimateForegroundBounds(sourceBitmap);
-      const uploadCandidates = getUploadCropCandidates(
-        sourceBitmap.width,
-        sourceBitmap.height,
-        foregroundBounds ?? undefined,
-      );
-      const candidates =
-        sourceBitmap.height <= 96 || sourceBitmap.width <= 320
-          ? uploadCandidates.filter((candidate) =>
-              ['foreground-bounds', 'strip-top-band', 'full-image'].includes(candidate.id),
-            )
-          : uploadCandidates;
-      let strongestFeedback: ScanFeedback = 'none';
-      const acceptedSerials = new Map<string, DetectedSerial>();
-      const candidateVotes = new Map<
-        string,
-        {
-          confidenceTotal: number;
-          hits: number;
-          maxConfidence: number;
-          source: SerialSource;
-        }
-      >();
+      const aggregated = await scanUploadCandidates(sourceBitmap, jobId, setScanProgress, {
+        previewFallback: file,
+        onPreview: setPreviewFromBlob,
+      });
 
-      for (let index = 0; index < candidates.length; index += 1) {
-        if (activeJobRef.current !== jobId) {
-          return;
-        }
+      ensureActiveJob(jobId);
 
-        const candidate = candidates[index];
-        setScanProgress({
-          progress: null,
-          label: `Probando recorte ${index + 1} de ${candidates.length}`,
-          detail: candidate.label,
-        });
-
-        let imageBitmap: ImageBitmap | null = null;
-
-        try {
-          const cropped = await createCroppedBitmap(sourceBitmap, candidate.rect);
-          imageBitmap = cropped.imageBitmap;
-          setPreviewFromBlob(cropped.previewBlob ?? file);
-
-          const scan = await runOcrScan(
-            imageBitmap,
-            `Analizando recorte ${index + 1} de ${candidates.length}`,
-            candidate.label,
-          );
-
-          if (activeJobRef.current !== jobId) {
-            return;
-          }
-
-          for (const serial of scan.serials) {
-            const current = acceptedSerials.get(serial.value);
-            if (!current || serial.confidence > current.confidence) {
-              acceptedSerials.set(serial.value, serial);
-            }
-          }
-
-          for (const candidateSerial of scan.candidateSerials) {
-            const current = candidateVotes.get(candidateSerial.value);
-
-            if (!current) {
-              candidateVotes.set(candidateSerial.value, {
-                confidenceTotal: candidateSerial.confidence,
-                hits: 1,
-                maxConfidence: candidateSerial.confidence,
-                source: candidateSerial.source,
-              });
-              continue;
-            }
-
-            current.confidenceTotal += candidateSerial.confidence;
-            current.hits += 1;
-            current.maxConfidence = Math.max(current.maxConfidence, candidateSerial.confidence);
-
-            if (candidateSerial.confidence >= current.maxConfidence) {
-              current.source = candidateSerial.source;
-            }
-          }
-
-          if (scan.feedback === 'low-confidence') {
-            strongestFeedback = 'low-confidence';
-          } else if (strongestFeedback === 'none') {
-            strongestFeedback = scan.feedback;
-          }
-        } finally {
-          imageBitmap?.close();
-        }
-      }
-
-      if (acceptedSerials.size > 0) {
-        setResults(
-          toSerialResults(
-            [...acceptedSerials.values()].sort((left, right) => right.confidence - left.confidence),
-          ),
-        );
-        setScanFeedback('none');
-        return;
-      }
-
-      const consensusSerials = [...candidateVotes.entries()]
-        .map(([value, vote]) => ({
-          value,
-          confidence: vote.confidenceTotal / vote.hits,
-          hits: vote.hits,
-          source: vote.source,
-        }))
-        .filter((vote) => vote.hits >= 2 && vote.confidence >= 0.5)
-        .sort((left, right) => right.confidence - left.confidence)
-        .map<DetectedSerial>((vote) => ({
-          value: vote.value,
-          confidence: vote.confidence,
-          source: vote.source,
-        }));
-
-      if (consensusSerials.length > 0) {
-        setResults(toSerialResults(consensusSerials));
-        setScanFeedback('none');
-        return;
-      }
-
-      setResults([]);
-      setScanFeedback(strongestFeedback === 'none' ? 'not-found' : strongestFeedback);
+      const serialResults = toSerialResults(aggregated.serials);
+      setResults(serialResults);
+      setScanFeedback(aggregated.feedback);
     } catch (error) {
-      if (activeJobRef.current !== jobId) {
+      if (error instanceof Error && error.message === 'Escaneo cancelado.') {
         return;
       }
 
-      if (error instanceof Error && error.message === 'Escaneo cancelado.') {
+      if (activeJobRef.current !== jobId) {
         return;
       }
 
@@ -1064,6 +1177,105 @@ export default function App() {
     void processUploadedImage(file);
   }
 
+  async function runDiagnostics(files: File[]) {
+    if (files.length === 0 || isBusy) {
+      return;
+    }
+
+    if (typeof createImageBitmap !== 'function') {
+      setCameraError('Este navegador no soporta el procesamiento OCR necesario.');
+      return;
+    }
+
+    stopCamera();
+    setCameraError(null);
+    setDiagnosticResults([]);
+
+    const jobId = ++activeJobRef.current;
+    const nextResults: DiagnosticResult[] = [];
+
+    setIsDiagnosticsRunning(true);
+    setDiagnosticsProgress({
+      progress: null,
+      label: 'Preparando diagnóstico',
+      detail: `${files.length} archivo${files.length === 1 ? '' : 's'}`,
+    });
+
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        ensureActiveJob(jobId);
+
+        const file = files[index];
+        const expected = parseExpectedSerialFromFileName(file.name);
+        let sourceBitmap: ImageBitmap | null = null;
+
+        try {
+          setDiagnosticsProgress({
+            progress: null,
+            label: `Analizando prueba ${index + 1} de ${files.length}`,
+            detail: file.name,
+          });
+
+          sourceBitmap = await createImageBitmap(file);
+          ensureActiveJob(jobId);
+
+          const aggregated = await scanUploadCandidates(
+            sourceBitmap,
+            jobId,
+            setDiagnosticsProgress,
+          );
+          ensureActiveJob(jobId);
+
+          const serialResults = toSerialResults(aggregated.serials);
+          const bestResult = serialResults[0] ?? null;
+          const detected = bestResult?.serialDisplay ?? null;
+          nextResults.push({
+            fileName: file.name,
+            expected,
+            detected,
+            confidence: bestResult?.confidence ?? null,
+            feedback: aggregated.feedback,
+            matched: expected ? detected === expected : null,
+            error: null,
+          });
+        } catch (error) {
+          if (error instanceof Error && error.message === 'Escaneo cancelado.') {
+            throw error;
+          }
+
+          nextResults.push({
+            fileName: file.name,
+            expected,
+            detected: null,
+            confidence: null,
+            feedback: 'not-found',
+            matched: expected ? false : null,
+            error: workerErrorMessage(error, 'No se pudo analizar esta imagen.'),
+          });
+        } finally {
+          sourceBitmap?.close();
+          setDiagnosticResults([...nextResults]);
+        }
+      }
+    } finally {
+      if (activeJobRef.current === jobId) {
+        setDiagnosticsProgress(null);
+        setIsDiagnosticsRunning(false);
+      }
+    }
+  }
+
+  function handleDiagnosticFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.currentTarget.value = '';
+
+    if (files.length === 0) {
+      return;
+    }
+
+    void runDiagnostics(files);
+  }
+
   function beginScanFromCapture(imageBitmap: ImageBitmap, previewBlob: Blob | null) {
     clearScanOutput();
 
@@ -1079,7 +1291,7 @@ export default function App() {
   }
 
   async function startCamera() {
-    if (isProcessing || isStartingCamera) {
+    if (isBusy || isStartingCamera) {
       return;
     }
 
@@ -1121,7 +1333,7 @@ export default function App() {
   }
 
   async function captureCameraFrame() {
-    if (isProcessing) {
+    if (isBusy) {
       return;
     }
 
@@ -1140,7 +1352,7 @@ export default function App() {
     const canvas = document.createElement('canvas');
     canvas.width = guideRect.width;
     canvas.height = guideRect.height;
-    const context = canvas.getContext('2d');
+    const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
     if (!context) {
       releaseCanvas(canvas);
@@ -1222,9 +1434,11 @@ export default function App() {
     return () => {
       isMounted = false;
       activeJobRef.current += 1;
+      clearFooterTapResetTimer();
       revokePreviewUrl();
       setWarmupProgress(null);
       setScanProgress(null);
+      setDiagnosticsProgress(null);
       const stream = streamRef.current;
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
@@ -1266,9 +1480,22 @@ export default function App() {
     });
   }, [isProcessing, results, scanFeedback]);
 
+  const diagnosticComparableCount = diagnosticResults.filter(
+    (result) => result.expected !== null,
+  ).length;
+  const diagnosticPassCount = diagnosticResults.filter((result) => result.matched === true).length;
+
   return (
     <div className="container">
       <main className="content">
+        <input
+          ref={diagnosticInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={handleDiagnosticFileChange}
+        />
         {ocrStatus === 'initializing' && !isCameraActive ? (
           <div className="status-box initializing">
             <Loader2 className="spinner" size={32} />
@@ -1327,7 +1554,7 @@ export default function App() {
               <button
                 type="button"
                 className="primary-btn"
-                disabled={isProcessing || isStartingCamera || ocrStatus === 'initializing'}
+                disabled={isBusy || isStartingCamera || ocrStatus === 'initializing'}
                 onClick={() => {
                   if (isCameraActive) {
                     void captureCameraFrame();
@@ -1349,7 +1576,7 @@ export default function App() {
               <button
                 type="button"
                 className="secondary-btn"
-                disabled={isProcessing || isStartingCamera || ocrStatus === 'initializing'}
+                disabled={isBusy || isStartingCamera || ocrStatus === 'initializing'}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <ImageUp size={20} />
@@ -1360,7 +1587,7 @@ export default function App() {
                 <button
                   type="button"
                   className="secondary-btn"
-                  disabled={isProcessing || isTogglingTorch}
+                  disabled={isBusy || isTogglingTorch}
                   onClick={() => void toggleTorch()}
                 >
                   {isTogglingTorch
@@ -1375,7 +1602,7 @@ export default function App() {
                 <button
                   type="button"
                   className="secondary-btn"
-                  disabled={isProcessing}
+                  disabled={isBusy}
                   onClick={stopCamera}
                 >
                   Cerrar cámara
@@ -1448,13 +1675,107 @@ export default function App() {
             <p>No se detectó un número de serie de 8 a 9 dígitos en la imagen capturada.</p>
           </div>
         )}
+
+        {isDiagnosticsVisible && (
+          <section className="diagnostics-card">
+            <div className="diagnostics-header">
+              <div className="diagnostics-copy">
+                <span className="camera-badge">Oculto</span>
+                <h2>Modo diagnóstico</h2>
+                <p>
+                  Ejecuta el mismo flujo real de recortes y OCR sobre varias imágenes. Si el
+                  archivo incluye un serial de 8 a 9 dígitos en el nombre, la app lo compara
+                  automáticamente.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={isDiagnosticsRunning}
+                onClick={() => setIsDiagnosticsVisible(false)}
+              >
+                Ocultar
+              </button>
+            </div>
+
+            <div className="diagnostics-actions">
+              <button
+                type="button"
+                className="primary-btn"
+                disabled={isBusy || ocrStatus === 'initializing'}
+                onClick={() => diagnosticInputRef.current?.click()}
+              >
+                <ImageUp size={20} />
+                <span>Cargar fixtures</span>
+              </button>
+
+              {diagnosticResults.length > 0 && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={isDiagnosticsRunning}
+                  onClick={() => setDiagnosticResults([])}
+                >
+                  Limpiar resultados
+                </button>
+              )}
+            </div>
+
+            {isDiagnosticsRunning && (
+              <div className="diagnostics-progress">
+                <Loader2 className="spinner" size={20} />
+                <LoadingProgressBar progress={diagnosticsProgress} />
+              </div>
+            )}
+
+            {diagnosticResults.length > 0 && (
+              <>
+                <div className="diagnostics-summary">
+                  <strong>{diagnosticResults.length}</strong>
+                  <span>archivos analizados</span>
+                  {diagnosticComparableCount > 0 && (
+                    <span>
+                      {diagnosticPassCount}/{diagnosticComparableCount} coincidencias exactas
+                    </span>
+                  )}
+                </div>
+
+                <div className="diagnostics-list">
+                  {diagnosticResults.map((result) => (
+                    <article
+                      key={`${result.fileName}-${result.expected ?? 'na'}`}
+                      className={`diagnostic-row ${
+                        result.matched === true
+                          ? 'diagnostic-pass'
+                          : result.matched === false
+                            ? 'diagnostic-fail'
+                            : 'diagnostic-neutral'
+                      }`}
+                    >
+                      <div className="diagnostic-row-main">
+                        <strong>{result.fileName}</strong>
+                        <span>Esperado: {result.expected ?? 'sin referencia'}</span>
+                      </div>
+                      <div className="diagnostic-row-meta">
+                        <span>{getDiagnosticStatusLabel(result)}</span>
+                        {result.confidence !== null && (
+                          <span>{Math.round(result.confidence * 100)}%</span>
+                        )}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
+        )}
       </main>
 
       <footer className="footer-copyright">
-        <p className="footer-note">
+        <button type="button" className="footer-note footer-note-trigger" onClick={handleFooterNoteTap}>
           Esta app corre en tu propio dispositivo y usa PaddleJS OCR en local, así que puede
           tardar más o confundirse cuando la foto está movida u oscura.
-        </p>
+        </button>
         <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
           © {new Date().getFullYear()} nubol23
         </a>

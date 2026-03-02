@@ -670,7 +670,7 @@ function createCanvasFromSource(source: ImageBitmap) {
   canvas.width = source.width;
   canvas.height = source.height;
   const taggedCanvas = tagCanvasForOcr(canvas);
-  const context = taggedCanvas.getContext('2d', { willReadFrequently: true });
+  const context = taggedCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
   if (!context) {
     releaseCanvas(taggedCanvas);
@@ -689,7 +689,7 @@ function createEnhancedCanvasVariant(sourceCanvas: OcrCompatibleCanvas): Prepare
   canvas.width = sourceCanvas.naturalWidth || sourceCanvas.width;
   canvas.height = sourceCanvas.naturalHeight || sourceCanvas.height;
   const taggedCanvas = tagCanvasForOcr(canvas);
-  const context = taggedCanvas.getContext('2d', { willReadFrequently: true });
+  const context = taggedCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
   if (!context) {
     releaseCanvas(taggedCanvas);
@@ -738,7 +738,7 @@ function createBinaryCanvasVariant(sourceCanvas: OcrCompatibleCanvas): PreparedC
   canvas.width = sourceCanvas.naturalWidth || sourceCanvas.width;
   canvas.height = sourceCanvas.naturalHeight || sourceCanvas.height;
   const taggedCanvas = tagCanvasForOcr(canvas);
-  const context = taggedCanvas.getContext('2d');
+  const context = taggedCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
   if (!context) {
     releaseCanvas(taggedCanvas);
@@ -885,7 +885,7 @@ function createPreparedCanvasVariant(
   const canvas = document.createElement('canvas');
   canvas.width = targetWidth;
   canvas.height = targetHeight;
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
   if (!context) {
     releaseCanvas(canvas);
