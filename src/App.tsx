@@ -1,19 +1,95 @@
 import { useEffect, useRef, useState } from 'react';
-import { Camera, CheckCircle2, Loader2, XCircle } from 'lucide-react';
+import { Camera, CheckCircle2, ImageUp, Loader2, XCircle } from 'lucide-react';
 
-const DETECTION_MODEL_PATH =
-  '/models/paddle-ocr/v1/ch_PP-OCRv2_det_fuse_activation/model.json';
-const RECOGNITION_MODEL_PATH =
-  '/models/paddle-ocr/v1/ch_PP-OCRv2_rec_fuse_activation/model.json';
-const DEFAULT_MAX_DIMENSION = 1280;
-const COMPACT_MAX_DIMENSION = 960;
-const MOBILE_MAX_VIEWPORT_WIDTH = 768;
+import {
+  ensurePaddleOcrReady,
+  looksLikePaddleMemoryError,
+  PaddleOcrTimeoutError,
+  scanWithPaddleOcr,
+  type DetectedSerial,
+  type ScanFeedback,
+  type SerialSource,
+} from './lib/paddle-ocr';
+
 const CAMERA_FRAME_WIDTH_RATIO = 0.78;
 const CAMERA_FRAME_HEIGHT_RATIO = 0.18;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
-const OCR_RECOGNITION_TIMEOUT_MS = 8000;
-const DENOMINATION_VALUES = ['200', '100', '50', '20', '10'] as const;
-const DENOMINATION_SET = new Set<string>(DENOMINATION_VALUES);
+const FOREGROUND_ANALYSIS_MAX_SIDE = 256;
+const FOREGROUND_COLOR_DISTANCE_THRESHOLD = 44;
+const FOREGROUND_CHROMA_THRESHOLD = 20;
+
+type RelativeCropPreset = {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type CropRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type UploadCropCandidate = {
+  id: string;
+  label: string;
+  rect: CropRect;
+};
+
+const UPLOAD_SCAN_PRESETS: readonly RelativeCropPreset[] = [
+  {
+    id: 'top-right-left',
+    label: 'serial superior derecho',
+    x: 0.44,
+    y: 0,
+    width: 0.42,
+    height: 0.08,
+  },
+  {
+    id: 'top-right-right',
+    label: 'serial superior derecho desplazado',
+    x: 0.54,
+    y: 0,
+    width: 0.42,
+    height: 0.08,
+  },
+  {
+    id: 'bottom-left-left',
+    label: 'serial inferior izquierdo',
+    x: 0,
+    y: 0.84,
+    width: 0.42,
+    height: 0.08,
+  },
+  {
+    id: 'bottom-left-right',
+    label: 'serial inferior izquierdo desplazado',
+    x: 0.08,
+    y: 0.84,
+    width: 0.42,
+    height: 0.08,
+  },
+  {
+    id: 'top-right-band',
+    label: 'banda superior derecha',
+    x: 0.4,
+    y: 0,
+    width: 0.56,
+    height: 0.1,
+  },
+  {
+    id: 'bottom-left-band',
+    label: 'banda inferior izquierda',
+    x: 0,
+    y: 0.82,
+    width: 0.56,
+    height: 0.1,
+  },
+] as const;
 
 const validRanges = [
   [67250001, 67700000],
@@ -54,22 +130,9 @@ const validRanges = [
   [107600001, 108050000],
   [108050001, 108500000],
   [109400001, 109850000],
-];
+] as const;
 
 type OcrStatus = 'idle' | 'initializing' | 'ready' | 'error';
-type CandidateSource = 'single-token' | 'adjacent-join' | 'fallback';
-type OcrPoint = [number, number];
-type OcrBox = [OcrPoint, OcrPoint, OcrPoint, OcrPoint];
-
-type OcrResponse = {
-  text?: unknown;
-  points?: unknown;
-};
-
-type OcrModule = {
-  init: (detectionModelPath?: string, recognitionModelPath?: string) => Promise<unknown>;
-  recognize: (source: OcrCompatibleCanvas) => Promise<OcrResponse | null>;
-};
 
 type TorchSettings = {
   torch?: boolean;
@@ -79,264 +142,76 @@ type TorchCapableTrack = MediaStreamTrack & {
   getCapabilities?: () => MediaTrackCapabilities & TorchSettings;
 };
 
-type SerialCandidate = {
-  serialDisplay: string;
-  source: CandidateSource;
-  confidence: number;
-  segmentIndexes: number[];
-};
-
 type SerialResult = {
   isValid: boolean;
   serialDisplay: string;
   serialNumeric: number;
-  source: CandidateSource;
+  source: SerialSource;
   confidence: number;
 };
 
-type OcrSegment = {
-  index: number;
-  rawText: string;
-  normalizedText: string;
-  analysisText: string;
-  pointBox: OcrBox | null;
-  boxWidth: number;
-  boxHeight: number;
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-  centerX: number;
-  centerY: number;
-  isLikelyVertical: boolean;
-  digitOnlyText: string;
-  hasTrailingLetterB: boolean;
-  isStandaloneSuffixB: boolean;
-  isDenominationToken: boolean;
-};
-
-type OcrCompatibleCanvas = HTMLCanvasElement & {
-  naturalWidth: number;
-  naturalHeight: number;
-};
-
-type PreparedCanvas = {
-  canvas: OcrCompatibleCanvas;
-  release: () => void;
-};
-
-type ScanFeedback = 'none' | 'not-found' | 'low-confidence';
-
-type RecognitionPassResult = {
-  tokens: string[];
-  candidates: SerialCandidate[];
-};
-
-type SerialScanOutcome = {
-  tokens: string[];
-  results: SerialResult[];
-  feedback: ScanFeedback;
+type LoadingProgressState = {
+  progress: number | null;
+  label: string;
+  detail?: string;
 };
 
 const noop = () => undefined;
 
-class OcrTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`El OCR tardó demasiado en responder (${timeoutMs} ms).`);
-    this.name = 'OcrTimeoutError';
-  }
+function clampProgress(value: number) {
+  return Math.max(0, Math.min(100, value));
 }
 
-let ocrModulePromise: Promise<OcrModule> | null = null;
-
-async function loadOcrModule() {
-  if (!ocrModulePromise) {
-    ocrModulePromise = import('@paddlejs-models/ocr') as Promise<OcrModule>;
-  }
-
-  try {
-    return await ocrModulePromise;
-  } catch (error) {
-    ocrModulePromise = null;
-    throw error;
-  }
+function clampCropValue(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
-function distance(a: OcrPoint, b: OcrPoint) {
-  return Math.hypot(a[0] - b[0], a[1] - b[1]);
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function normalizeOcrSegmentText(text: string) {
-  return text.toUpperCase().replace(/\s+/g, ' ').trim();
-}
-
-function sanitizeSegmentToken(text: string) {
-  return text.replace(/[^A-Z0-9|]+/g, '');
-}
-
-function normalizeDigitSequence(text: string) {
-  const compactText = sanitizeSegmentToken(text);
-  const hasTrailingLetterB =
-    compactText.endsWith('B') && /[0-9OQDIL|ZSGB]/.test(compactText.slice(0, -1));
-  const numericCore = hasTrailingLetterB ? compactText.slice(0, -1) : compactText;
-
-  const digitCore = numericCore
-    .replace(/[OQD]/g, '0')
-    .replace(/[IL|]/g, '1')
-    .replace(/Z/g, '2')
-    .replace(/S/g, '5')
-    .replace(/G/g, '6')
-    .replace(/B/g, '8')
-    .replace(/[^0-9]/g, '');
-
-  return {
-    digitCore,
-    hasTrailingLetterB,
-  };
-}
-
-function parseOcrBox(rawBox: unknown): OcrBox | null {
-  if (!Array.isArray(rawBox) || rawBox.length !== 4) {
+function LoadingProgressBar({ progress }: { progress: LoadingProgressState | null }) {
+  if (!progress) {
     return null;
   }
 
-  const parsedPoints = rawBox.map((point) => {
-    if (!Array.isArray(point) || point.length !== 2) {
-      return null;
-    }
+  const normalizedProgress =
+    typeof progress.progress === 'number' ? clampProgress(progress.progress) : null;
 
-    const x = Number(point[0]);
-    const y = Number(point[1]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      return null;
-    }
-
-    return [x, y] as OcrPoint;
-  });
-
-  if (parsedPoints.some((point) => point === null)) {
-    return null;
-  }
-
-  return parsedPoints as OcrBox;
-}
-
-function computeMedian(values: number[]) {
-  if (values.length === 0) {
-    return 0;
-  }
-
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[middle - 1] + sorted[middle]) / 2
-    : sorted[middle];
-}
-
-function getSourcePriority(source: CandidateSource) {
-  switch (source) {
-    case 'single-token':
-      return 3;
-    case 'adjacent-join':
-      return 2;
-    default:
-      return 1;
-  }
-}
-
-function isSubsequence(shorter: string, longer: string) {
-  let shorterIndex = 0;
-
-  for (const char of longer) {
-    if (char === shorter[shorterIndex]) {
-      shorterIndex += 1;
-      if (shorterIndex === shorter.length) {
-        return true;
-      }
-    }
-  }
-
-  return shorterIndex === shorter.length;
-}
-
-function getCandidateStrength(candidate: SerialCandidate) {
   return (
-    candidate.confidence +
-    candidate.serialDisplay.length * 6 +
-    getSourcePriority(candidate.source) * 5
+    <div className="progress-panel" role="status" aria-live="polite">
+      <div className="progress-meta">
+        <span className="progress-label">{progress.label}</span>
+        {normalizedProgress !== null && (
+          <span className="progress-value">{Math.round(normalizedProgress)}%</span>
+        )}
+      </div>
+      {normalizedProgress !== null && (
+        <div
+          className="progress-track"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={normalizedProgress}
+          aria-valuetext={`${Math.round(normalizedProgress)}%`}
+        >
+          <div className="progress-fill" style={{ width: `${normalizedProgress}%` }} />
+        </div>
+      )}
+      {progress.detail && <small className="progress-detail">{progress.detail}</small>}
+    </div>
   );
 }
 
-function areSubsetDuplicateSerials(left: string, right: string) {
-  if (left === right || left.length === right.length) {
-    return false;
-  }
+function waitForNextPaint(frames = 1) {
+  return new Promise<void>((resolve) => {
+    const step = (remainingFrames: number) => {
+      if (remainingFrames <= 0) {
+        resolve();
+        return;
+      }
 
-  const [shorter, longer] =
-    left.length < right.length ? [left, right] : [right, left];
+      window.requestAnimationFrame(() => step(remainingFrames - 1));
+    };
 
-  if (shorter.length < 7) {
-    return false;
-  }
-
-  return longer.includes(shorter) || isSubsequence(shorter, longer);
-}
-
-function compareNearDuplicatePreference(current: SerialCandidate, existing: SerialCandidate) {
-  if (!areSubsetDuplicateSerials(current.serialDisplay, existing.serialDisplay)) {
-    return 0;
-  }
-
-  const [shorter, longer] =
-    current.serialDisplay.length < existing.serialDisplay.length
-      ? [current, existing]
-      : [existing, current];
-
-  if (getCandidateStrength(longer) >= getCandidateStrength(shorter) - 12) {
-    return current === longer ? 1 : -1;
-  }
-
-  const currentStrength = getCandidateStrength(current);
-  const existingStrength = getCandidateStrength(existing);
-
-  if (currentStrength !== existingStrength) {
-    return currentStrength > existingStrength ? 1 : -1;
-  }
-
-  if (current.serialDisplay.length !== existing.serialDisplay.length) {
-    return current.serialDisplay.length > existing.serialDisplay.length ? 1 : -1;
-  }
-
-  return getSourcePriority(current.source) - getSourcePriority(existing.source);
-}
-
-function hasGeometry(segment: OcrSegment) {
-  return segment.pointBox !== null && segment.boxWidth > 0 && segment.boxHeight > 0;
-}
-
-function isMemoryConstrainedDevice() {
-  const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-  return typeof deviceMemory === 'number' && deviceMemory <= 2;
-}
-
-function isLikelyMobileDevice() {
-  const hasCoarsePointer =
-    typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
-  const hasTouch = navigator.maxTouchPoints > 0;
-  const hasNarrowViewport = window.innerWidth <= MOBILE_MAX_VIEWPORT_WIDTH;
-
-  return hasCoarsePointer || (hasTouch && hasNarrowViewport);
-}
-
-function looksLikeMemoryError(error: unknown) {
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  return ['memory', 'webgl', 'context', 'texture', 'quota', 'allocation'].some((hint) =>
-    message.includes(hint),
-  );
+    step(frames);
+  });
 }
 
 function getCaptureGuideRect(width: number, height: number) {
@@ -351,436 +226,305 @@ function getCaptureGuideRect(width: number, height: number) {
   };
 }
 
-function waitForNextPaint(frames = 1) {
-  return new Promise<void>((resolve) => {
-    const nextFrame = (remainingFrames: number) => {
-      if (remainingFrames <= 0) {
-        resolve();
-        return;
-      }
+function resolveRelativeCropRect(
+  width: number,
+  height: number,
+  preset: RelativeCropPreset,
+  baseRect?: CropRect,
+): CropRect {
+  const area = baseRect ?? {
+    x: 0,
+    y: 0,
+    width,
+    height,
+  };
+  const x = clampCropValue(
+    area.x + Math.round(area.width * preset.x),
+    0,
+    Math.max(0, width - 1),
+  );
+  const y = clampCropValue(
+    area.y + Math.round(area.height * preset.y),
+    0,
+    Math.max(0, height - 1),
+  );
+  const maxWidth = Math.max(1, area.x + area.width - x);
+  const maxHeight = Math.max(1, area.y + area.height - y);
 
-      window.requestAnimationFrame(() => nextFrame(remainingFrames - 1));
-    };
-
-    nextFrame(frames);
-  });
-}
-
-function buildOcrSegments(tokens: string[], rawPoints: unknown) {
-  const rawPointList = Array.isArray(rawPoints) ? rawPoints : [];
-
-  return tokens.map<OcrSegment>((token, index) => {
-    const normalizedText = normalizeOcrSegmentText(token);
-    const analysisText = sanitizeSegmentToken(normalizedText);
-    const pointBox = parseOcrBox(rawPointList[index]);
-    const { digitCore, hasTrailingLetterB } = normalizeDigitSequence(analysisText);
-
-    if (!pointBox) {
-      return {
-        index,
-        rawText: token,
-        normalizedText,
-        analysisText,
-        pointBox: null,
-        boxWidth: 0,
-        boxHeight: 0,
-        minX: 0,
-        maxX: 0,
-        minY: 0,
-        maxY: 0,
-        centerX: 0,
-        centerY: 0,
-        isLikelyVertical: false,
-        digitOnlyText: digitCore,
-        hasTrailingLetterB,
-        isStandaloneSuffixB: analysisText === 'B',
-        isDenominationToken: analysisText === digitCore && DENOMINATION_SET.has(digitCore),
-      };
-    }
-
-    const xs = pointBox.map((point) => point[0]);
-    const ys = pointBox.map((point) => point[1]);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    const boxWidth = (distance(pointBox[0], pointBox[1]) + distance(pointBox[2], pointBox[3])) / 2;
-    const boxHeight = (distance(pointBox[0], pointBox[3]) + distance(pointBox[1], pointBox[2])) / 2;
-
-    return {
-      index,
-      rawText: token,
-      normalizedText,
-      analysisText,
-      pointBox,
-      boxWidth,
-      boxHeight,
-      minX,
-      maxX,
-      minY,
-      maxY,
-      centerX: (minX + maxX) / 2,
-      centerY: (minY + maxY) / 2,
-      isLikelyVertical: boxHeight > boxWidth * 1.25,
-      digitOnlyText: digitCore,
-      hasTrailingLetterB,
-      isStandaloneSuffixB: analysisText === 'B',
-      isDenominationToken: analysisText === digitCore && DENOMINATION_SET.has(digitCore),
-    };
-  });
-}
-
-function areSegmentsAdjacent(left: OcrSegment, right: OcrSegment) {
-  if (!hasGeometry(left) || !hasGeometry(right)) {
-    return true;
-  }
-
-  const minHeight = Math.min(left.boxHeight, right.boxHeight);
-  const maxHeight = Math.max(left.boxHeight, right.boxHeight);
-  if (minHeight === 0 || maxHeight / minHeight > 2.2) {
-    return false;
-  }
-
-  const horizontalAligned =
-    Math.abs(left.centerY - right.centerY) <= Math.max(left.boxHeight, right.boxHeight) * 0.7;
-  const verticalAligned =
-    Math.abs(left.centerX - right.centerX) <= Math.max(left.boxWidth, right.boxWidth) * 0.7;
-
-  if (horizontalAligned) {
-    const [earlier, later] = left.centerX <= right.centerX ? [left, right] : [right, left];
-    const gap = Math.max(0, later.minX - earlier.maxX);
-    return gap <= Math.max(left.boxHeight, right.boxHeight) * 1.5;
-  }
-
-  if (verticalAligned) {
-    const [earlier, later] = left.centerY <= right.centerY ? [left, right] : [right, left];
-    const gap = Math.max(0, later.minY - earlier.maxY);
-    return gap <= Math.max(left.boxWidth, right.boxWidth) * 1.5;
-  }
-
-  return false;
-}
-
-function isStandaloneSuffixNeighbor(segment: OcrSegment, maybeSuffix: OcrSegment | undefined) {
-  if (!maybeSuffix || !maybeSuffix.isStandaloneSuffixB) {
-    return false;
-  }
-
-  return areSegmentsAdjacent(segment, maybeSuffix);
-}
-
-function getSuffixBoost(segment: OcrSegment, segments: OcrSegment[]) {
-  let boost = 0;
-  if (segment.hasTrailingLetterB) {
-    boost += 12;
-  }
-
-  if (
-    isStandaloneSuffixNeighbor(segment, segments[segment.index + 1]) ||
-    isStandaloneSuffixNeighbor(segment, segments[segment.index - 1])
-  ) {
-    boost += 10;
-  }
-
-  return boost;
-}
-
-function getSegmentSizeAdjustment(segment: OcrSegment, medianNumericHeight: number) {
-  if (!hasGeometry(segment) || medianNumericHeight <= 0) {
-    return 0;
-  }
-
-  if (segment.boxHeight > medianNumericHeight * 1.6) {
-    return -18;
-  }
-
-  if (segment.boxHeight <= medianNumericHeight * 1.15) {
-    return 4;
-  }
-
-  return 0;
-}
-
-function createCandidate(
-  serialDisplay: string,
-  source: CandidateSource,
-  segmentIndexes: number[],
-  baseConfidence: number,
-  extraConfidence: number,
-): SerialCandidate {
   return {
-    serialDisplay,
-    source,
-    segmentIndexes,
-    confidence: clamp(baseConfidence + extraConfidence, 1, 200),
+    x,
+    y,
+    width: clampCropValue(Math.round(area.width * preset.width), 1, maxWidth),
+    height: clampCropValue(Math.round(area.height * preset.height), 1, maxHeight),
   };
 }
 
-function extractCandidatesFromPiece(
-  piece: string,
-  segment: OcrSegment,
-  segments: OcrSegment[],
-  medianNumericHeight: number,
+function getAveragePatchColor(
+  data: Uint8ClampedArray,
+  width: number,
+  startX: number,
+  startY: number,
+  patchWidth: number,
+  patchHeight: number,
 ) {
-  const candidates: SerialCandidate[] = [];
-  const { digitCore, hasTrailingLetterB } = normalizeDigitSequence(piece);
-  const suffixBoost = getSuffixBoost(segment, segments) + (hasTrailingLetterB ? 6 : 0);
-  const sizeAdjustment = getSegmentSizeAdjustment(segment, medianNumericHeight);
-  const orientationAdjustment = segment.isLikelyVertical ? 2 : 0;
+  let redSum = 0;
+  let greenSum = 0;
+  let blueSum = 0;
+  let count = 0;
 
-  if ((digitCore.length === 8 || digitCore.length === 9) && !DENOMINATION_SET.has(digitCore)) {
-    const baseConfidence = digitCore.length === 9 ? 100 : 88;
-    candidates.push(
-      createCandidate(
-        digitCore,
-        'single-token',
-        [segment.index],
-        baseConfidence,
-        suffixBoost + sizeAdjustment + orientationAdjustment,
-      ),
-    );
+  for (let y = startY; y < startY + patchHeight; y += 1) {
+    for (let x = startX; x < startX + patchWidth; x += 1) {
+      const pixelIndex = (y * width + x) * 4;
+      redSum += data[pixelIndex];
+      greenSum += data[pixelIndex + 1];
+      blueSum += data[pixelIndex + 2];
+      count += 1;
+    }
   }
 
-  if (digitCore.length > 9) {
-    for (const denomination of DENOMINATION_VALUES) {
-      if (!digitCore.startsWith(denomination)) {
+  if (count === 0) {
+    return {
+      red: 0,
+      green: 0,
+      blue: 0,
+    };
+  }
+
+  return {
+    red: redSum / count,
+    green: greenSum / count,
+    blue: blueSum / count,
+  };
+}
+
+function estimateForegroundBounds(source: ImageBitmap) {
+  const scale = Math.min(
+    1,
+    FOREGROUND_ANALYSIS_MAX_SIDE / Math.max(source.width, source.height),
+  );
+  const analysisWidth = Math.max(1, Math.round(source.width * scale));
+  const analysisHeight = Math.max(1, Math.round(source.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = analysisWidth;
+  canvas.height = analysisHeight;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+
+  if (!context) {
+    releaseCanvas(canvas);
+    return null;
+  }
+
+  context.drawImage(source, 0, 0, analysisWidth, analysisHeight);
+  const { data } = context.getImageData(0, 0, analysisWidth, analysisHeight);
+  const patchSize = Math.max(6, Math.round(Math.min(analysisWidth, analysisHeight) * 0.08));
+  const patches = [
+    getAveragePatchColor(data, analysisWidth, 0, 0, patchSize, patchSize),
+    getAveragePatchColor(data, analysisWidth, analysisWidth - patchSize, 0, patchSize, patchSize),
+    getAveragePatchColor(
+      data,
+      analysisWidth,
+      0,
+      analysisHeight - patchSize,
+      patchSize,
+      patchSize,
+    ),
+    getAveragePatchColor(
+      data,
+      analysisWidth,
+      analysisWidth - patchSize,
+      analysisHeight - patchSize,
+      patchSize,
+      patchSize,
+    ),
+  ];
+
+  const background = patches.reduce(
+    (current, patch) => ({
+      red: current.red + patch.red,
+      green: current.green + patch.green,
+      blue: current.blue + patch.blue,
+    }),
+    {
+      red: 0,
+      green: 0,
+      blue: 0,
+    },
+  );
+
+  const backgroundRed = background.red / patches.length;
+  const backgroundGreen = background.green / patches.length;
+  const backgroundBlue = background.blue / patches.length;
+
+  let left = analysisWidth;
+  let top = analysisHeight;
+  let right = -1;
+  let bottom = -1;
+  let foregroundCount = 0;
+
+  for (let y = 0; y < analysisHeight; y += 1) {
+    for (let x = 0; x < analysisWidth; x += 1) {
+      const pixelIndex = (y * analysisWidth + x) * 4;
+      const red = data[pixelIndex];
+      const green = data[pixelIndex + 1];
+      const blue = data[pixelIndex + 2];
+      const colorDistance =
+        Math.abs(red - backgroundRed) +
+        Math.abs(green - backgroundGreen) +
+        Math.abs(blue - backgroundBlue);
+      const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
+
+      if (
+        colorDistance < FOREGROUND_COLOR_DISTANCE_THRESHOLD &&
+        chroma < FOREGROUND_CHROMA_THRESHOLD
+      ) {
         continue;
       }
 
-      const remainder = digitCore.slice(denomination.length);
-      if ((remainder.length === 8 || remainder.length === 9) && !DENOMINATION_SET.has(remainder)) {
-        const baseConfidence = remainder.length === 9 ? 68 : 60;
-        candidates.push(
-          createCandidate(
-            remainder,
-            'fallback',
-            [segment.index],
-            baseConfidence,
-            suffixBoost + sizeAdjustment - 8,
-          ),
-        );
-      }
+      foregroundCount += 1;
+      left = Math.min(left, x);
+      top = Math.min(top, y);
+      right = Math.max(right, x);
+      bottom = Math.max(bottom, y);
     }
   }
 
-  return candidates;
+  releaseCanvas(canvas);
+
+  if (foregroundCount === 0 || right <= left || bottom <= top) {
+    return null;
+  }
+
+  const widthCoverage = (right - left + 1) / analysisWidth;
+  const heightCoverage = (bottom - top + 1) / analysisHeight;
+
+  if (widthCoverage < 0.2 || heightCoverage < 0.15) {
+    return null;
+  }
+
+  const paddingX = Math.max(4, Math.round((right - left + 1) * 0.08));
+  const paddingY = Math.max(4, Math.round((bottom - top + 1) * 0.12));
+  const paddedLeft = clampCropValue(left - paddingX, 0, Math.max(0, analysisWidth - 1));
+  const paddedTop = clampCropValue(top - paddingY, 0, Math.max(0, analysisHeight - 1));
+  const paddedRight = clampCropValue(right + paddingX, paddedLeft + 1, analysisWidth);
+  const paddedBottom = clampCropValue(bottom + paddingY, paddedTop + 1, analysisHeight);
+
+  return {
+    x: clampCropValue(Math.floor(paddedLeft / scale), 0, Math.max(0, source.width - 1)),
+    y: clampCropValue(Math.floor(paddedTop / scale), 0, Math.max(0, source.height - 1)),
+    width: clampCropValue(
+      Math.ceil((paddedRight - paddedLeft) / scale),
+      1,
+      source.width,
+    ),
+    height: clampCropValue(
+      Math.ceil((paddedBottom - paddedTop) / scale),
+      1,
+      source.height,
+    ),
+  };
 }
 
-function extractSingleSegmentCandidates(
-  segments: OcrSegment[],
-  medianNumericHeight: number,
-) {
-  const candidates: SerialCandidate[] = [];
+function getUploadCropCandidates(width: number, height: number, baseRect?: CropRect) {
+  const activeRect = baseRect ?? {
+    x: 0,
+    y: 0,
+    width,
+    height,
+  };
+  const stripAspectRatio = activeRect.width / Math.max(1, activeRect.height);
+  const hasForegroundCrop =
+    activeRect.x > 0 ||
+    activeRect.y > 0 ||
+    activeRect.width < width ||
+    activeRect.height < height;
+  const foregroundCandidate = hasForegroundCrop
+    ? ({
+        id: 'foreground-bounds',
+        label: 'texto detectado',
+        rect: activeRect,
+      } satisfies UploadCropCandidate)
+    : null;
+  const stripTopBandCandidate =
+    stripAspectRatio >= 2.3
+      ? ({
+          id: 'strip-top-band',
+          label: 'franja superior del serial',
+          rect: {
+            x: activeRect.x,
+            y: activeRect.y,
+            width: activeRect.width,
+            height: clampCropValue(
+              Math.round(activeRect.height * 0.68),
+              1,
+              Math.max(1, height - activeRect.y),
+            ),
+          },
+        } satisfies UploadCropCandidate)
+      : null;
+  const fullImageCandidate = {
+    id: 'full-image',
+    label: 'imagen completa',
+    rect: {
+      x: 0,
+      y: 0,
+      width,
+      height,
+    },
+  } satisfies UploadCropCandidate;
+  const presetCandidates = UPLOAD_SCAN_PRESETS.map<UploadCropCandidate>((preset) => ({
+    id: preset.id,
+    label: preset.label,
+    rect: resolveRelativeCropRect(width, height, preset, activeRect),
+  }));
 
-  for (const segment of segments) {
-    const pieces = segment.normalizedText
-      .split(/[^A-Z0-9|]+/g)
-      .map(sanitizeSegmentToken)
-      .filter(Boolean);
-
-    const analysisPieces = pieces.length > 0 ? pieces : [segment.analysisText];
-    const seenSerials = new Set<string>();
-
-    for (const piece of analysisPieces) {
-      for (const candidate of extractCandidatesFromPiece(
-        piece,
-        segment,
-        segments,
-        medianNumericHeight,
-      )) {
-        if (!seenSerials.has(candidate.serialDisplay)) {
-          seenSerials.add(candidate.serialDisplay);
-          candidates.push(candidate);
-        }
-      }
-    }
-
-    if (segment.analysisText && !analysisPieces.includes(segment.analysisText)) {
-      for (const candidate of extractCandidatesFromPiece(
-        segment.analysisText,
-        segment,
-        segments,
-        medianNumericHeight,
-      )) {
-        if (!seenSerials.has(candidate.serialDisplay)) {
-          seenSerials.add(candidate.serialDisplay);
-          candidates.push(candidate);
-        }
-      }
-    }
-  }
-
-  return candidates;
-}
-
-function extractAdjacentJoinCandidates(
-  segments: OcrSegment[],
-  medianNumericHeight: number,
-) {
-  const candidates: SerialCandidate[] = [];
-
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    const left = segments[index];
-    const right = segments[index + 1];
-
-    if (
-      left.isDenominationToken ||
-      right.isDenominationToken ||
-      left.isStandaloneSuffixB ||
-      right.isStandaloneSuffixB
-    ) {
-      continue;
-    }
-
-    if (!left.digitOnlyText || !right.digitOnlyText) {
-      continue;
-    }
-
-    if (left.digitOnlyText.length >= 8 || right.digitOnlyText.length >= 8) {
-      continue;
-    }
-
-    if (!areSegmentsAdjacent(left, right)) {
-      continue;
-    }
-
-    const serialDisplay = `${left.digitOnlyText}${right.digitOnlyText}`;
-    if ((serialDisplay.length !== 8 && serialDisplay.length !== 9) || DENOMINATION_SET.has(serialDisplay)) {
-      continue;
-    }
-
-    const suffixBoost =
-      (right.hasTrailingLetterB ? 10 : 0) +
-      (isStandaloneSuffixNeighbor(right, segments[index + 2]) ? 10 : 0);
-    const sizeAdjustment =
-      Math.round(
-        (getSegmentSizeAdjustment(left, medianNumericHeight) +
-          getSegmentSizeAdjustment(right, medianNumericHeight)) /
-          2,
-      ) + (left.isLikelyVertical || right.isLikelyVertical ? 2 : 0);
-
-    candidates.push(
-      createCandidate(
-        serialDisplay,
-        'adjacent-join',
-        [left.index, right.index],
-        serialDisplay.length === 9 ? 78 : 70,
-        suffixBoost + sizeAdjustment,
-      ),
-    );
-  }
-
-  return candidates;
-}
-
-function extractSerialCandidates(tokens: string[], rawPoints: unknown) {
-  if (tokens.length === 0) {
-    return [];
-  }
-
-  const segments = buildOcrSegments(tokens, rawPoints);
-  const medianNumericHeight = computeMedian(
-    segments
-      .filter((segment) => !segment.isDenominationToken && hasGeometry(segment) && segment.digitOnlyText)
-      .map((segment) => segment.boxHeight),
+  const guideWidth = Math.max(1, Math.round(activeRect.width * CAMERA_FRAME_WIDTH_RATIO));
+  const guideHeight = Math.max(1, Math.round(activeRect.height * CAMERA_FRAME_HEIGHT_RATIO));
+  const guideRect = {
+    x: clampCropValue(
+      activeRect.x + Math.round((activeRect.width - guideWidth) / 2),
+      0,
+      Math.max(0, width - 1),
+    ),
+    y: clampCropValue(
+      activeRect.y + Math.round((activeRect.height - guideHeight) / 2),
+      0,
+      Math.max(0, height - 1),
+    ),
+    width: clampCropValue(guideWidth, 1, Math.max(1, width - activeRect.x)),
+    height: clampCropValue(guideHeight, 1, Math.max(1, height - activeRect.y)),
+  };
+  const topGuideHeight = Math.max(1, Math.round(activeRect.height * 0.22));
+  const topGuideY = clampCropValue(
+    activeRect.y + Math.round(activeRect.height * 0.04),
+    0,
+    Math.max(0, height - 1),
   );
 
-  const candidates = [
-    ...extractSingleSegmentCandidates(segments, medianNumericHeight),
-    ...extractAdjacentJoinCandidates(segments, medianNumericHeight),
-  ];
-
-  const sortedCandidates = candidates.sort((left, right) => {
-    if (right.confidence !== left.confidence) {
-      return right.confidence - left.confidence;
-    }
-
-    if (right.serialDisplay.length !== left.serialDisplay.length) {
-      return right.serialDisplay.length - left.serialDisplay.length;
-    }
-
-    return getSourcePriority(right.source) - getSourcePriority(left.source);
-  });
-
-  const selected: SerialCandidate[] = [];
-  const seenSerials = new Set<string>();
-  const usedSegments = new Set<number>();
-
-  for (const candidate of sortedCandidates) {
-    if (candidate.confidence < 55 || seenSerials.has(candidate.serialDisplay)) {
-      continue;
-    }
-
-    let shouldSkip = false;
-
-    for (let index = selected.length - 1; index >= 0; index -= 1) {
-      const existing = selected[index];
-      const preference = compareNearDuplicatePreference(candidate, existing);
-
-      if (preference < 0) {
-        shouldSkip = true;
-        break;
-      }
-
-      if (preference > 0) {
-        seenSerials.delete(existing.serialDisplay);
-        existing.segmentIndexes.forEach((segmentIndex) => usedSegments.delete(segmentIndex));
-        selected.splice(index, 1);
-      }
-    }
-
-    if (shouldSkip) {
-      continue;
-    }
-
-    if (candidate.segmentIndexes.some((segmentIndex) => usedSegments.has(segmentIndex))) {
-      continue;
-    }
-
-    seenSerials.add(candidate.serialDisplay);
-    candidate.segmentIndexes.forEach((segmentIndex) => usedSegments.add(segmentIndex));
-    selected.push(candidate);
-
-    if (selected.length >= 6) {
-      break;
-    }
-  }
-
-  return selected;
-}
-
-function toSerialResults(candidates: SerialCandidate[]) {
-  return candidates
-    .map<SerialResult | null>((candidate) => {
-      const serialNumeric = Number(candidate.serialDisplay);
-      if (!Number.isFinite(serialNumeric)) {
-        return null;
-      }
-
-      let isInvalid = false;
-      for (const [min, max] of validRanges) {
-        if (serialNumeric >= min && serialNumeric <= max) {
-          isInvalid = true;
-          break;
-        }
-      }
-
-      return {
-        isValid: !isInvalid,
-        serialDisplay: candidate.serialDisplay,
-        serialNumeric,
-        source: candidate.source,
-        confidence: candidate.confidence,
-      };
-    })
-    .filter((result): result is SerialResult => result !== null);
-}
-
-function tagCanvasForOcr(canvas: HTMLCanvasElement) {
-  const taggedCanvas = canvas as OcrCompatibleCanvas;
-  taggedCanvas.naturalWidth = canvas.width;
-  taggedCanvas.naturalHeight = canvas.height;
-  return taggedCanvas;
+  return [
+    ...(foregroundCandidate ? [foregroundCandidate] : []),
+    ...(stripTopBandCandidate ? [stripTopBandCandidate] : []),
+    fullImageCandidate,
+    ...presetCandidates,
+    {
+      id: 'top-guide',
+      label: 'guía superior ancha',
+      rect: {
+            x: guideRect.x,
+            y: topGuideY,
+            width: guideRect.width,
+            height: clampCropValue(
+              topGuideHeight,
+              1,
+              Math.max(1, activeRect.y + activeRect.height - topGuideY),
+            ),
+          },
+        },
+    {
+      id: 'center-guide',
+      label: 'guía central',
+      rect: guideRect,
+    },
+  ] satisfies UploadCropCandidate[];
 }
 
 function releaseCanvas(canvas: HTMLCanvasElement | null) {
@@ -803,66 +547,80 @@ function canvasToBlob(canvas: HTMLCanvasElement) {
   });
 }
 
-async function withTimeout<T>(work: () => Promise<T>, timeoutMs: number) {
-  let timeoutId: number | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = window.setTimeout(() => {
-      reject(new OcrTimeoutError(timeoutMs));
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([work(), timeoutPromise]);
-  } finally {
-    if (timeoutId !== null) {
-      window.clearTimeout(timeoutId);
-    }
-  }
-}
-
-function createPreparedCanvasVariant(
-  sourceCanvas: OcrCompatibleCanvas,
-  maxDimension: number,
-): PreparedCanvas {
-  const naturalWidth = sourceCanvas.naturalWidth || sourceCanvas.width;
-  const naturalHeight = sourceCanvas.naturalHeight || sourceCanvas.height;
-  if (!naturalWidth || !naturalHeight) {
-    return { canvas: sourceCanvas, release: noop };
-  }
-
-  let targetWidth = naturalWidth;
-  let targetHeight = naturalHeight;
-  const longestSide = Math.max(naturalWidth, naturalHeight);
-
-  if (longestSide > maxDimension) {
-    const scale = maxDimension / longestSide;
-    targetWidth = Math.max(1, Math.round(naturalWidth * scale));
-    targetHeight = Math.max(1, Math.round(naturalHeight * scale));
-  }
-
-  const needsResize = targetWidth !== naturalWidth || targetHeight !== naturalHeight;
-  if (!needsResize) {
-    return { canvas: sourceCanvas, release: noop };
-  }
-
+async function createCroppedBitmap(source: ImageBitmap, rect: CropRect) {
   const canvas = document.createElement('canvas');
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
+  canvas.width = rect.width;
+  canvas.height = rect.height;
   const context = canvas.getContext('2d');
 
   if (!context) {
     releaseCanvas(canvas);
-    return { canvas: sourceCanvas, release: noop };
+    throw new Error('No se pudo preparar el recorte para el OCR.');
   }
 
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, targetWidth, targetHeight);
-  context.drawImage(sourceCanvas, 0, 0, targetWidth, targetHeight);
+  context.drawImage(
+    source,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    0,
+    0,
+    rect.width,
+    rect.height,
+  );
 
-  return {
-    canvas: tagCanvasForOcr(canvas),
-    release: () => releaseCanvas(canvas),
-  };
+  try {
+    const [previewBlob, imageBitmap] = await Promise.all([
+      canvasToBlob(canvas),
+      createImageBitmap(canvas),
+    ]);
+
+    return {
+      imageBitmap,
+      previewBlob,
+    };
+  } finally {
+    releaseCanvas(canvas);
+  }
+}
+
+function extractSerialNumber(serialDisplay: string) {
+  const numericText = serialDisplay.replace(/[^0-9]/g, '');
+  const serialNumeric = Number(numericText);
+
+  return Number.isFinite(serialNumeric) ? serialNumeric : null;
+}
+
+function isReportedAsInvalid(serialNumeric: number) {
+  return validRanges.some(([min, max]) => serialNumeric >= min && serialNumeric <= max);
+}
+
+function toSerialResults(serials: DetectedSerial[]) {
+  return serials
+    .map<SerialResult | null>((serial) => {
+      const serialNumeric = extractSerialNumber(serial.value);
+      if (serialNumeric === null) {
+        return null;
+      }
+
+      return {
+        isValid: !isReportedAsInvalid(serialNumeric),
+        serialDisplay: serial.value,
+        serialNumeric,
+        source: serial.source,
+        confidence: serial.confidence,
+      };
+    })
+    .filter((result): result is SerialResult => result !== null);
+}
+
+function workerErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return fallback;
 }
 
 export default function App() {
@@ -878,44 +636,46 @@ export default function App() {
   const [isTorchEnabled, setIsTorchEnabled] = useState(false);
   const [isTogglingTorch, setIsTogglingTorch] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [warmupProgress, setWarmupProgress] = useState<LoadingProgressState | null>(null);
+  const [scanProgress, setScanProgress] = useState<LoadingProgressState | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
-  const ocrModuleRef = useRef<OcrModule | null>(null);
-  const ocrInitPromiseRef = useRef<Promise<void> | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const warmupPromiseRef = useRef<Promise<void> | null>(null);
   const activeJobRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
-  const compactImageModeRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
 
-  const revokePreviewUrl = () => {
+  function revokePreviewUrl() {
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
       previewUrlRef.current = null;
     }
-  };
+  }
 
-  const setPreviewFromBlob = (blob: Blob) => {
+  function setPreviewFromBlob(blob: Blob) {
     revokePreviewUrl();
 
     const previewUrl = URL.createObjectURL(blob);
     previewUrlRef.current = previewUrl;
     setImageSrc(previewUrl);
-  };
+  }
 
-  const clearScanOutput = () => {
+  function clearScanOutput() {
     setResults(null);
     setScanFeedback('none');
-  };
+  }
 
-  const getActiveVideoTrack = () => {
+  function getActiveVideoTrack() {
     const stream = streamRef.current;
     if (!stream) {
       return null;
     }
 
     return (stream.getVideoTracks()[0] as TorchCapableTrack | undefined) ?? null;
-  };
+  }
 
-  const supportsTorchControl = (track: TorchCapableTrack | null) => {
+  function supportsTorchControl(track: TorchCapableTrack | null) {
     if (!track || typeof track.getCapabilities !== 'function') {
       return false;
     }
@@ -923,15 +683,16 @@ export default function App() {
     const supportedConstraints = navigator.mediaDevices?.getSupportedConstraints?.() as
       | (MediaTrackSupportedConstraints & TorchSettings)
       | undefined;
+
     if (!supportedConstraints?.torch) {
       return false;
     }
 
     const capabilities = track.getCapabilities() as MediaTrackCapabilities & TorchSettings;
     return Boolean(capabilities?.torch);
-  };
+  }
 
-  const syncTorchAvailability = () => {
+  function syncTorchAvailability() {
     const track = getActiveVideoTrack();
     const supportsTorch = supportsTorchControl(track);
 
@@ -940,9 +701,9 @@ export default function App() {
       setIsTorchEnabled(false);
       setIsTogglingTorch(false);
     }
-  };
+  }
 
-  const stopCamera = () => {
+  function stopCamera() {
     const stream = streamRef.current;
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
@@ -960,9 +721,9 @@ export default function App() {
     setIsTorchAvailable(false);
     setIsTorchEnabled(false);
     setIsTogglingTorch(false);
-  };
+  }
 
-  const toggleTorch = async () => {
+  async function toggleTorch() {
     const track = getActiveVideoTrack();
     const supportsTorch = supportsTorchControl(track);
 
@@ -977,6 +738,7 @@ export default function App() {
       await track.applyConstraints({
         advanced: [{ torch: nextTorchState } as MediaTrackConstraintSet & TorchSettings],
       } as MediaTrackConstraints);
+
       setIsTorchEnabled(nextTorchState);
       setCameraError(null);
     } catch (error) {
@@ -985,109 +747,66 @@ export default function App() {
     } finally {
       setIsTogglingTorch(false);
     }
-  };
+  }
 
-  const ensureOcrReady = async () => {
-    if (ocrModuleRef.current) {
-      if (ocrStatus !== 'ready') {
-        setOcrStatus('ready');
-      }
-      return ocrModuleRef.current;
+  function warmupOcr() {
+    if (ocrStatus === 'ready') {
+      return Promise.resolve();
     }
 
-    if (ocrInitPromiseRef.current) {
-      await ocrInitPromiseRef.current;
-      if (!ocrModuleRef.current) {
-        throw new Error('OCR no disponible.');
-      }
-      return ocrModuleRef.current;
+    if (warmupPromiseRef.current) {
+      return warmupPromiseRef.current;
     }
 
     setOcrStatus('initializing');
     setOcrInitError(null);
+    setWarmupProgress({
+      progress: null,
+      label: 'Cargando motor OCR',
+    });
 
-    const initPromise = (async () => {
-      const ocrModule = await loadOcrModule();
-      await ocrModule.init(DETECTION_MODEL_PATH, RECOGNITION_MODEL_PATH);
-      ocrModuleRef.current = ocrModule;
-      setOcrStatus('ready');
-    })();
+    const promise = ensurePaddleOcrReady()
+      .then(() => {
+        setOcrStatus('ready');
+        setOcrInitError(null);
+      })
+      .catch((error) => {
+        const message = workerErrorMessage(
+          error,
+          'No se pudo inicializar el motor OCR en este dispositivo.',
+        );
+        setOcrStatus('error');
+        setOcrInitError(message);
+        throw error;
+      })
+      .finally(() => {
+        setWarmupProgress(null);
+        warmupPromiseRef.current = null;
+      });
 
-    ocrInitPromiseRef.current = initPromise;
+    warmupPromiseRef.current = promise;
+    return promise;
+  }
 
-    try {
-      await initPromise;
-      if (!ocrModuleRef.current) {
-        throw new Error('OCR no disponible.');
-      }
+  async function runOcrScan(image: ImageBitmap, progressLabel: string, detail?: string) {
+    await warmupOcr();
+    setScanProgress({
+      progress: null,
+      label: progressLabel,
+      detail,
+    });
+    await waitForNextPaint(1);
+    return scanWithPaddleOcr(image);
+  }
 
-      return ocrModuleRef.current;
-    } catch (error) {
-      console.error('Error al inicializar OCR:', error);
-      ocrModuleRef.current = null;
-      setOcrStatus('error');
-      setOcrInitError(
-        error instanceof Error
-          ? error.message
-          : 'No se pudo inicializar el motor OCR en este dispositivo.',
-      );
-      throw error;
-    } finally {
-      if (ocrInitPromiseRef.current === initPromise) {
-        ocrInitPromiseRef.current = null;
-      }
-
-    }
-  };
-
-  const runRecognitionPass = async (
-    sourceCanvas: OcrCompatibleCanvas,
-  ): Promise<RecognitionPassResult> => {
-    const ocrModule = ocrModuleRef.current ?? (await ensureOcrReady());
-    const response = await withTimeout(
-      async () => (await ocrModule.recognize(sourceCanvas)) as OcrResponse | null,
-      OCR_RECOGNITION_TIMEOUT_MS,
-    );
-    const tokens = Array.isArray(response?.text)
-      ? response.text.filter((token): token is string => typeof token === 'string')
-      : [];
-    const candidates = extractSerialCandidates(tokens, response?.points);
-
-    return {
-      tokens,
-      candidates,
-    };
-  };
-
-  const runConfirmedScan = async (
-    sourceCanvas: OcrCompatibleCanvas,
-    maxDimension: number,
-  ): Promise<SerialScanOutcome> => {
-    const preparedCanvas = createPreparedCanvasVariant(sourceCanvas, maxDimension);
-    let recognitionPass: RecognitionPassResult = {
-      tokens: [],
-      candidates: [],
-    };
-
-    try {
-      recognitionPass = await runRecognitionPass(preparedCanvas.canvas);
-    } finally {
-      preparedCanvas.release();
-    }
-
-    const results = toSerialResults(recognitionPass.candidates);
-    const sawNumericHint = recognitionPass.tokens.some((token) => /[0-9OQDIL|ZSGB]/i.test(token));
-
-    return {
-      tokens: recognitionPass.tokens,
-      results,
-      feedback: results.length > 0 ? 'none' : sawNumericHint ? 'low-confidence' : 'not-found',
-    };
-  };
-
-  const processCapturedCanvas = async (captureCanvas: OcrCompatibleCanvas) => {
+  async function processCapturedBitmap(imageBitmap: ImageBitmap) {
     const jobId = ++activeJobRef.current;
+
     setIsProcessing(true);
+    setScanProgress({
+      progress: null,
+      label: 'Preparando escaneo',
+    });
 
     try {
       await waitForNextPaint(2);
@@ -1095,75 +814,271 @@ export default function App() {
         return;
       }
 
-      const initialMaxDimension =
-        compactImageModeRef.current || isMemoryConstrainedDevice() || isLikelyMobileDevice()
-          ? COMPACT_MAX_DIMENSION
-          : DEFAULT_MAX_DIMENSION;
-
-      let scanOutcome: SerialScanOutcome;
-      try {
-        scanOutcome = await runConfirmedScan(captureCanvas, initialMaxDimension);
-      } catch (error) {
-        if (initialMaxDimension !== COMPACT_MAX_DIMENSION && looksLikeMemoryError(error)) {
-          compactImageModeRef.current = true;
-          scanOutcome = await runConfirmedScan(captureCanvas, COMPACT_MAX_DIMENSION);
-        } else {
-          throw error;
-        }
-      }
+      const scan = await runOcrScan(imageBitmap, 'Analizando serial');
 
       if (activeJobRef.current !== jobId) {
         return;
       }
 
-      setResults(scanOutcome.results);
-      setScanFeedback(scanOutcome.feedback);
+      setResults(toSerialResults(scan.serials));
+      setScanFeedback(scan.feedback);
       setCameraError(null);
     } catch (error) {
       if (activeJobRef.current !== jobId) {
         return;
       }
 
+      if (error instanceof Error && error.message === 'Escaneo cancelado.') {
+        return;
+      }
+
       console.error('Error de OCR:', error);
       setResults(null);
       setScanFeedback('none');
-      compactImageModeRef.current = true;
 
-      if (error instanceof OcrTimeoutError) {
-        stopCamera();
+      if (error instanceof PaddleOcrTimeoutError) {
         setCameraError(
-          'El OCR tardó demasiado en responder. Se cerró la cámara para liberar memoria; ábrela de nuevo e intenta otra vez.',
+          'El OCR tardó demasiado en responder. Cierra otras apps y vuelve a intentarlo.',
         );
-      } else if (looksLikeMemoryError(error)) {
-        stopCamera();
+      } else if (looksLikePaddleMemoryError(error)) {
         setCameraError(
-          'El dispositivo se quedó sin memoria durante el escaneo. Se cerró la cámara para liberar recursos.',
+          'El dispositivo se quedó sin memoria durante el escaneo. Intenta de nuevo con el serial más cerca.',
         );
       } else {
-        setCameraError('No se pudo completar el escaneo. Intenta de nuevo.');
+        setCameraError(
+          workerErrorMessage(error, 'No se pudo completar el escaneo. Intenta de nuevo.'),
+        );
       }
     } finally {
-      releaseCanvas(captureCanvas);
+      try {
+        imageBitmap.close();
+      } catch {
+        // Ignored.
+      }
 
       if (activeJobRef.current === jobId) {
+        setScanProgress(null);
         setIsProcessing(false);
       }
     }
-  };
+  }
 
-  const beginScanFromCapture = (captureCanvas: OcrCompatibleCanvas, previewBlob: Blob | null) => {
+  async function processUploadedImage(file: File) {
+    if (isProcessing) {
+      return;
+    }
+
+    if (typeof createImageBitmap !== 'function') {
+      setCameraError('Este navegador no soporta el procesamiento OCR necesario.');
+      return;
+    }
+
+    stopCamera();
     clearScanOutput();
+    setCameraError(null);
+
+    const jobId = ++activeJobRef.current;
+    let sourceBitmap: ImageBitmap | null = null;
+
+    setIsProcessing(true);
+    setScanProgress({
+      progress: null,
+      label: 'Preparando imagen de prueba',
+      detail: file.name,
+    });
+
+    try {
+      sourceBitmap = await createImageBitmap(file);
+      if (activeJobRef.current !== jobId) {
+        return;
+      }
+
+      const foregroundBounds = estimateForegroundBounds(sourceBitmap);
+      const uploadCandidates = getUploadCropCandidates(
+        sourceBitmap.width,
+        sourceBitmap.height,
+        foregroundBounds ?? undefined,
+      );
+      const candidates =
+        sourceBitmap.height <= 96 || sourceBitmap.width <= 320
+          ? uploadCandidates.filter((candidate) =>
+              ['foreground-bounds', 'strip-top-band', 'full-image'].includes(candidate.id),
+            )
+          : uploadCandidates;
+      let strongestFeedback: ScanFeedback = 'none';
+      const acceptedSerials = new Map<string, DetectedSerial>();
+      const candidateVotes = new Map<
+        string,
+        {
+          confidenceTotal: number;
+          hits: number;
+          maxConfidence: number;
+          source: SerialSource;
+        }
+      >();
+
+      for (let index = 0; index < candidates.length; index += 1) {
+        if (activeJobRef.current !== jobId) {
+          return;
+        }
+
+        const candidate = candidates[index];
+        setScanProgress({
+          progress: null,
+          label: `Probando recorte ${index + 1} de ${candidates.length}`,
+          detail: candidate.label,
+        });
+
+        let imageBitmap: ImageBitmap | null = null;
+
+        try {
+          const cropped = await createCroppedBitmap(sourceBitmap, candidate.rect);
+          imageBitmap = cropped.imageBitmap;
+          setPreviewFromBlob(cropped.previewBlob ?? file);
+
+          const scan = await runOcrScan(
+            imageBitmap,
+            `Analizando recorte ${index + 1} de ${candidates.length}`,
+            candidate.label,
+          );
+
+          if (activeJobRef.current !== jobId) {
+            return;
+          }
+
+          for (const serial of scan.serials) {
+            const current = acceptedSerials.get(serial.value);
+            if (!current || serial.confidence > current.confidence) {
+              acceptedSerials.set(serial.value, serial);
+            }
+          }
+
+          for (const candidateSerial of scan.candidateSerials) {
+            const current = candidateVotes.get(candidateSerial.value);
+
+            if (!current) {
+              candidateVotes.set(candidateSerial.value, {
+                confidenceTotal: candidateSerial.confidence,
+                hits: 1,
+                maxConfidence: candidateSerial.confidence,
+                source: candidateSerial.source,
+              });
+              continue;
+            }
+
+            current.confidenceTotal += candidateSerial.confidence;
+            current.hits += 1;
+            current.maxConfidence = Math.max(current.maxConfidence, candidateSerial.confidence);
+
+            if (candidateSerial.confidence >= current.maxConfidence) {
+              current.source = candidateSerial.source;
+            }
+          }
+
+          if (scan.feedback === 'low-confidence') {
+            strongestFeedback = 'low-confidence';
+          } else if (strongestFeedback === 'none') {
+            strongestFeedback = scan.feedback;
+          }
+        } finally {
+          imageBitmap?.close();
+        }
+      }
+
+      if (acceptedSerials.size > 0) {
+        setResults(
+          toSerialResults(
+            [...acceptedSerials.values()].sort((left, right) => right.confidence - left.confidence),
+          ),
+        );
+        setScanFeedback('none');
+        return;
+      }
+
+      const consensusSerials = [...candidateVotes.entries()]
+        .map(([value, vote]) => ({
+          value,
+          confidence: vote.confidenceTotal / vote.hits,
+          hits: vote.hits,
+          source: vote.source,
+        }))
+        .filter((vote) => vote.hits >= 2 && vote.confidence >= 0.5)
+        .sort((left, right) => right.confidence - left.confidence)
+        .map<DetectedSerial>((vote) => ({
+          value: vote.value,
+          confidence: vote.confidence,
+          source: vote.source,
+        }));
+
+      if (consensusSerials.length > 0) {
+        setResults(toSerialResults(consensusSerials));
+        setScanFeedback('none');
+        return;
+      }
+
+      setResults([]);
+      setScanFeedback(strongestFeedback === 'none' ? 'not-found' : strongestFeedback);
+    } catch (error) {
+      if (activeJobRef.current !== jobId) {
+        return;
+      }
+
+      if (error instanceof Error && error.message === 'Escaneo cancelado.') {
+        return;
+      }
+
+      console.error('Error al procesar la imagen:', error);
+      setResults(null);
+      setScanFeedback('none');
+      if (error instanceof PaddleOcrTimeoutError) {
+        setCameraError(
+          'El OCR tardó demasiado en responder. Intenta de nuevo con una imagen más nítida y recortada.',
+        );
+      } else if (looksLikePaddleMemoryError(error)) {
+        setCameraError(
+          'El dispositivo se quedó sin memoria durante el análisis. Usa una imagen más ajustada al serial.',
+        );
+      } else {
+        setCameraError(
+          workerErrorMessage(error, 'No se pudo procesar la imagen seleccionada. Intenta de nuevo.'),
+        );
+      }
+    } finally {
+      sourceBitmap?.close();
+
+      if (activeJobRef.current === jobId) {
+        setScanProgress(null);
+        setIsProcessing(false);
+      }
+    }
+  }
+
+  function handleImageFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const [file] = event.target.files ?? [];
+    event.currentTarget.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    void processUploadedImage(file);
+  }
+
+  function beginScanFromCapture(imageBitmap: ImageBitmap, previewBlob: Blob | null) {
+    clearScanOutput();
+
     if (previewBlob) {
       setPreviewFromBlob(previewBlob);
     } else {
       revokePreviewUrl();
       setImageSrc(null);
     }
-    setCameraError(null);
-    void processCapturedCanvas(captureCanvas);
-  };
 
-  const startCamera = async () => {
+    setCameraError(null);
+    void processCapturedBitmap(imageBitmap);
+  }
+
+  async function startCamera() {
     if (isProcessing || isStartingCamera) {
       return;
     }
@@ -1203,9 +1118,9 @@ export default function App() {
     } finally {
       setIsStartingCamera(false);
     }
-  };
+  }
 
-  const captureCameraFrame = async () => {
+  async function captureCameraFrame() {
     if (isProcessing) {
       return;
     }
@@ -1216,15 +1131,19 @@ export default function App() {
       return;
     }
 
+    if (typeof createImageBitmap !== 'function') {
+      setCameraError('Este navegador no soporta el procesamiento OCR necesario.');
+      return;
+    }
+
     const guideRect = getCaptureGuideRect(video.videoWidth, video.videoHeight);
     const canvas = document.createElement('canvas');
     canvas.width = guideRect.width;
     canvas.height = guideRect.height;
-    const captureCanvas = tagCanvasForOcr(canvas);
-    const context = captureCanvas.getContext('2d');
+    const context = canvas.getContext('2d');
 
     if (!context) {
-      releaseCanvas(captureCanvas);
+      releaseCanvas(canvas);
       setCameraError('No se pudo preparar la captura. Intenta de nuevo.');
       return;
     }
@@ -1241,11 +1160,78 @@ export default function App() {
       guideRect.height,
     );
 
-    const blob = await canvasToBlob(captureCanvas);
+    try {
+      const [previewBlob, imageBitmap] = await Promise.all([
+        canvasToBlob(canvas),
+        createImageBitmap(canvas),
+      ]);
 
-    stopCamera();
-    beginScanFromCapture(captureCanvas, blob);
-  };
+      stopCamera();
+      beginScanFromCapture(imageBitmap, previewBlob);
+    } catch (error) {
+      console.error('Error al capturar la imagen:', error);
+      setCameraError('No se pudo procesar la foto del serial. Intenta de nuevo.');
+    } finally {
+      releaseCanvas(canvas);
+    }
+  }
+
+  useEffect(() => {
+    let isMounted = true;
+
+    setOcrStatus('initializing');
+    setOcrInitError(null);
+    setWarmupProgress({
+      progress: null,
+      label: 'Preparando OCR',
+    });
+
+    const initialWarmup = ensurePaddleOcrReady()
+      .then(() => {
+        if (!isMounted) {
+          return;
+        }
+
+        setOcrStatus('ready');
+        setOcrInitError(null);
+      })
+      .catch((error) => {
+        if (!isMounted) {
+          return;
+        }
+
+        const message = workerErrorMessage(
+          error,
+          'No se pudo inicializar el motor OCR en este dispositivo.',
+        );
+        setOcrStatus('error');
+        setOcrInitError(message);
+      })
+      .finally(() => {
+        if (warmupPromiseRef.current === initialWarmup) {
+          warmupPromiseRef.current = null;
+        }
+
+        if (isMounted) {
+          setWarmupProgress(null);
+        }
+      });
+
+    warmupPromiseRef.current = initialWarmup;
+
+    return () => {
+      isMounted = false;
+      activeJobRef.current += 1;
+      revokePreviewUrl();
+      setWarmupProgress(null);
+      setScanProgress(null);
+      const stream = streamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1280,17 +1266,6 @@ export default function App() {
     });
   }, [isProcessing, results, scanFeedback]);
 
-  useEffect(() => {
-    return () => {
-      activeJobRef.current += 1;
-      revokePreviewUrl();
-      const stream = streamRef.current;
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, []);
-
   return (
     <div className="container">
       <main className="content">
@@ -1302,6 +1277,7 @@ export default function App() {
               <br />
               <small>La primera carga puede tardar unos segundos</small>
             </p>
+            <LoadingProgressBar progress={warmupProgress} />
           </div>
         ) : ocrStatus === 'error' && !isCameraActive ? (
           <div className="status-box initializing">
@@ -1311,7 +1287,7 @@ export default function App() {
               <br />
               <small>{ocrInitError ?? 'Intenta nuevamente.'}</small>
             </p>
-            <button className="primary-btn" onClick={() => void ensureOcrReady()}>
+            <button className="primary-btn" onClick={() => void warmupOcr()}>
               Reintentar
             </button>
           </div>
@@ -1322,21 +1298,15 @@ export default function App() {
               <h2>Captura guiada del serial</h2>
               <p>
                 Coloca solo el número de serie dentro del recuadro. La app toma una captura y
-                libera la cámara antes de analizarla para evitar cierres del navegador en
-                teléfonos.
+                analiza solo ese recorte con PaddleJS en tu dispositivo para mejorar la precisión
+                y evitar procesar todo el billete.
               </p>
             </div>
 
             {isCameraActive && (
               <div className="camera-stage-shell">
                 <div className="camera-stage">
-                  <video
-                    ref={videoRef}
-                    className="camera-video"
-                    autoPlay
-                    muted
-                    playsInline
-                  />
+                  <video ref={videoRef} className="camera-video" autoPlay muted playsInline />
                   <div className="camera-guide" />
                   <div className="camera-guide-label">Alinea el número de serie aquí</div>
                 </div>
@@ -1346,10 +1316,18 @@ export default function App() {
             {cameraError && <p className="camera-error">{cameraError}</p>}
 
             <div className="camera-actions">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                hidden
+                onChange={handleImageFileChange}
+              />
+
               <button
                 type="button"
                 className="primary-btn"
-                disabled={isProcessing || isStartingCamera}
+                disabled={isProcessing || isStartingCamera || ocrStatus === 'initializing'}
                 onClick={() => {
                   if (isCameraActive) {
                     void captureCameraFrame();
@@ -1366,6 +1344,16 @@ export default function App() {
                       ? 'Abriendo cámara...'
                       : 'Abrir cámara guiada'}
                 </span>
+              </button>
+
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={isProcessing || isStartingCamera || ocrStatus === 'initializing'}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <ImageUp size={20} />
+                <span>Probar con imagen</span>
               </button>
 
               {isCameraActive && isTorchAvailable && (
@@ -1405,6 +1393,7 @@ export default function App() {
               <div className="processing-overlay">
                 <Loader2 className="spinner" size={48} />
                 <span>Escaneando serial...</span>
+                <LoadingProgressBar progress={scanProgress} />
               </div>
             )}
           </div>
@@ -1414,7 +1403,7 @@ export default function App() {
           <div className="results-container">
             {results.map((result) => (
               <div
-                key={`${result.serialDisplay}-${result.source}`}
+                key={`${result.serialDisplay}-${result.source}-${result.confidence}`}
                 className={`result-card ${result.isValid ? 'valid' : 'invalid'}`}
               >
                 {result.isValid ? (
@@ -1463,8 +1452,8 @@ export default function App() {
 
       <footer className="footer-copyright">
         <p className="footer-note">
-          Esta app corre en tu propio dispositivo y usa un modelo pequeño, así que puede
-          confundirse cuando la foto está movida u oscura.
+          Esta app corre en tu propio dispositivo y usa PaddleJS OCR en local, así que puede
+          tardar más o confundirse cuando la foto está movida u oscura.
         </p>
         <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
           © {new Date().getFullYear()} nubol23
