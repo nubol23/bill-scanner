@@ -1521,13 +1521,7 @@ export default function App() {
         ) : (
           <section className="camera-card">
             <div className="camera-copy">
-              <span className="camera-badge">Recomendado</span>
-              <h2>Captura guiada del serial</h2>
-              <p>
-                Coloca solo el número de serie dentro del recuadro. La app toma una captura y
-                analiza solo ese recorte con PaddleJS en tu dispositivo para mejorar la precisión
-                y evitar procesar todo el billete.
-              </p>
+              <h2>Coloca el número de serie dentro del recuadro</h2>
             </div>
 
             {isCameraActive && (
@@ -1773,8 +1767,8 @@ export default function App() {
 
       <footer className="footer-copyright">
         <button type="button" className="footer-note footer-note-trigger" onClick={handleFooterNoteTap}>
-          Esta app corre en tu propio dispositivo y usa PaddleJS OCR en local, así que puede
-          tardar más o confundirse cuando la foto está movida u oscura.
+          Esta app corre en tu propio dispositivo, así que puede
+          tardar más o confundirse cuando la foto está movida o está oscura.
         </button>
         <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
           © {new Date().getFullYear()} nubol23
