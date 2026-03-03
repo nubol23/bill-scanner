@@ -50,6 +50,7 @@ type SerialResult = {
   serialDisplay: string;
   serialNumeric: number;
   confidence: number;
+  series: string | null;
 };
 
 type LoadingProgressState = {
@@ -505,6 +506,7 @@ function toSerialResult(
   serialDisplay: string,
   confidence: number,
   denomination: BillDenomination,
+  series: string | null = null,
 ): SerialResult | null {
   const serialNumeric = extractSerialNumber(serialDisplay);
   if (serialNumeric === null) {
@@ -516,7 +518,12 @@ function toSerialResult(
     serialDisplay,
     serialNumeric,
     confidence,
+    series,
   };
+}
+
+function shouldShowSeriesWarning(series: string | null) {
+  return Boolean(series && series !== 'B');
 }
 
 function bestResponse(
@@ -530,6 +537,9 @@ function bestResponse(
   const currentConfidence = current.confidence ?? 0;
   const nextConfidence = next.confidence ?? 0;
   if (nextConfidence > currentConfidence) {
+    return next;
+  }
+  if (nextConfidence === currentConfidence && !current.series && next.series) {
     return next;
   }
 
@@ -687,6 +697,7 @@ export default function App() {
         response.serial,
         response.confidence ?? response.candidates[0]?.confidence ?? 0.5,
         selectedDenomination,
+        response.series,
       );
       setResults(nextResult ? [nextResult] : []);
       setScanFeedback('none');
@@ -890,6 +901,7 @@ export default function App() {
         await applyRecognizeResponse({
           status: 'not_found',
           serial: null,
+          series: null,
           raw_text: '',
           confidence: null,
           candidates: [],
@@ -1185,6 +1197,9 @@ export default function App() {
                     <CheckCircle2 size={48} className="icon-valid" />
                     <h2>Billete de Bs {selectedDenomination} Válido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
+                    {shouldShowSeriesWarning(result.series) && (
+                      <p className="series-warning-chip">El billete parece no ser de la serie B</p>
+                    )}
                     <p>
                       No pertenece a los rangos reportados por el
                       BCB para billetes de Bs {selectedDenomination}.
@@ -1195,6 +1210,9 @@ export default function App() {
                     <XCircle size={48} className="icon-invalid" />
                     <h2>Billete de Bs {selectedDenomination} Inválido</h2>
                     <p className="serial-code">{result.serialDisplay}</p>
+                    {shouldShowSeriesWarning(result.series) && (
+                      <p className="series-warning-chip">El billete parece no ser de la serie B</p>
+                    )}
                     <p>
                       ¡Cuidado! Pertenece a un lote reportado
                       robado por el BCB para billetes de Bs {selectedDenomination}.

@@ -12,6 +12,7 @@ class InvalidImageError(Exception):
 class RecognizedCandidate:
   text: str
   confidence: float
+  series: str | None = None
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class OcrResult:
   raw_text: str
   serial: str | None
   candidates: list[RecognizedCandidate]
+  series: str | None = None
   raw_confidence: float | None = None
 
 

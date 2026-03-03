@@ -11,6 +11,7 @@ async function cleanupLegacyRuntime() {
       const registrations = await navigator.serviceWorker.getRegistrations()
       await Promise.all(registrations.map((registration) => registration.unregister()))
     } catch {
+      void 0
     }
   }
 
@@ -27,6 +28,7 @@ async function cleanupLegacyRuntime() {
           .map((cacheName) => caches.delete(cacheName)),
       )
     } catch {
+      void 0
     }
   }
 }

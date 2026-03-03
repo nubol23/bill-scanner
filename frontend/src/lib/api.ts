@@ -6,6 +6,7 @@ export type RecognizeCandidate = {
 export type RecognizeResponse = {
   status: 'ok' | 'not_found';
   serial: string | null;
+  series: string | null;
   raw_text: string;
   confidence: number | null;
   candidates: RecognizeCandidate[];

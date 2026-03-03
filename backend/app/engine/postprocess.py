@@ -89,6 +89,21 @@ def _normalize_character(character: str) -> tuple[str, bool]:
   return upper_character, False
 
 
+def _extract_series_letter(text: str, start_index: int) -> str | None:
+  series_letter: str | None = None
+
+  for character in text[start_index:]:
+    if character.isspace():
+      continue
+    if series_letter is not None:
+      return None
+    if not character.isalpha():
+      return None
+    series_letter = character.upper()
+
+  return series_letter
+
+
 def extract_serial_candidates(
   text: str,
   char_confidences: tuple[float, ...],
@@ -98,7 +113,7 @@ def extract_serial_candidates(
 ) -> list[RecognizedCandidate]:
   normalized_rows = [_normalize_character(character) for character in text]
   normalized_text = "".join(value for value, _ in normalized_rows)
-  candidate_rows: dict[str, tuple[float, float, int, int, int]] = {}
+  candidate_rows: dict[str, tuple[float, float, int, int, int, str | None]] = {}
 
   run_start = -1
 
@@ -134,16 +149,29 @@ def extract_serial_candidates(
         candidate_confidence = float(sum(confidence_slice) / len(confidence_slice))
         confusable_count = sum(1 for _, was_confusable in normalized_rows[start:end] if was_confusable)
         effective_confidence = candidate_confidence - (confusable_count * CONFUSABLE_DIGIT_PENALTY)
+        series = _extract_series_letter(text, end)
 
         previous = candidate_rows.get(digits)
-        if previous and previous[0] >= effective_confidence:
-          continue
+        if previous:
+          previous_effective_confidence, previous_confidence, _, _, _, previous_series = previous
+          if previous_effective_confidence > effective_confidence:
+            continue
+          if previous_effective_confidence == effective_confidence:
+            if previous_confidence > candidate_confidence:
+              continue
+            if (
+              previous_confidence == candidate_confidence
+              and bool(previous_series)
+              and not series
+            ):
+              continue
         candidate_rows[digits] = (
           effective_confidence,
           candidate_confidence,
           candidate_length,
           confusable_count,
           start,
+          series,
         )
 
     run_start = -1
@@ -154,6 +182,6 @@ def extract_serial_candidates(
   )
 
   return [
-    RecognizedCandidate(text=text, confidence=confidence)
-    for text, (_, confidence, _, _, _) in sorted_candidates[:5]
+    RecognizedCandidate(text=text, confidence=confidence, series=series)
+    for text, (_, confidence, _, _, _, series) in sorted_candidates[:5]
   ]

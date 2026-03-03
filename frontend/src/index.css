@@ -649,6 +649,22 @@ body {
   color: var(--text-main);
 }
 
+.series-warning-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0.25rem 0 0.4rem;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(180, 83, 9, 0.18);
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .icon-valid {
   color: var(--success);
   margin-bottom: 0.25rem;

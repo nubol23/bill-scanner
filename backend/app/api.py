@@ -74,6 +74,7 @@ async def recognize(request: Request, image: UploadFile = File(...)) -> Recogniz
   return RecognizeResponse(
     status="ok" if result.serial else "not_found",
     serial=result.serial,
+    series=result.series if result.serial else None,
     raw_text=result.raw_text,
     confidence=result.raw_confidence if result.serial else None,
     candidates=[

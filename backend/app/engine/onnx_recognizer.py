@@ -106,6 +106,7 @@ class OnnxSerialRecognizer(OcrEngine):
         raw_text=source_view.raw_text,
         serial=best_serial.text,
         candidates=serial_candidates,
+        series=best_serial.series,
         raw_confidence=best_serial.confidence,
       )
 

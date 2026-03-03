@@ -15,9 +15,10 @@ class StubEngine(OcrEngine):
 
   def recognize(self, image_bytes: bytes) -> OcrResult:
     return OcrResult(
-      raw_text="024613645",
+      raw_text="024613645 B",
       serial="024613645",
-      candidates=[RecognizedCandidate(text="024613645", confidence=0.99)],
+      candidates=[RecognizedCandidate(text="024613645", confidence=0.99, series="B")],
+      series="B",
       raw_confidence=0.99,
     )
 
@@ -65,6 +66,7 @@ def test_recognize_returns_serial_payload():
   payload = response.json()
   assert payload["status"] == "ok"
   assert payload["serial"] == "024613645"
+  assert payload["series"] == "B"
   assert payload["candidates"][0]["text"] == "024613645"
 
 
