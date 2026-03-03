@@ -561,6 +561,8 @@ function errorMessageForScan(error: unknown) {
 
 export default function App() {
   const [selectedDenomination, setSelectedDenomination] = useState<BillDenomination>('50');
+  const [manualSerialInput, setManualSerialInput] = useState('');
+  const [manualInputError, setManualInputError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
@@ -597,6 +599,7 @@ export default function App() {
   function clearScanOutput() {
     setResults(null);
     setScanFeedback('none');
+    setManualInputError(null);
   }
 
   function stopCamera() {
@@ -917,6 +920,39 @@ export default function App() {
     void processUploadedImage(file);
   }
 
+  function handleManualSerialChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const sanitizedValue = event.target.value.replace(/[^0-9]/g, '').slice(0, 9);
+    setManualSerialInput(sanitizedValue);
+    if (manualInputError) {
+      setManualInputError(null);
+    }
+  }
+
+  function handleManualSubmit() {
+    if (isBusy) {
+      return;
+    }
+
+    const normalizedSerial = manualSerialInput.trim();
+    if (normalizedSerial.length < 8 || normalizedSerial.length > 9) {
+      setManualInputError('Ingresa un número de serie de 8 a 9 dígitos.');
+      return;
+    }
+
+    const manualResult = toSerialResult(normalizedSerial, 1, selectedDenomination);
+    if (!manualResult) {
+      setManualInputError('No se pudo interpretar el número de serie ingresado.');
+      return;
+    }
+
+    stopCamera();
+    clearScanOutput();
+    setCameraError(null);
+    revokePreviewUrl();
+    setImageSrc(null);
+    setResults([manualResult]);
+  }
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !streamRef.current) {
@@ -993,27 +1029,15 @@ export default function App() {
             </div>
           </div>
 
-          {isCameraActive && (
-            <div className="camera-stage-shell">
-              <div className="camera-stage">
-                <video ref={videoRef} className="camera-video" autoPlay muted playsInline />
-                <div className="camera-guide" />
-                <div className="camera-guide-label">Alinea el número de serie aquí</div>
-              </div>
-            </div>
-          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={handleImageFileChange}
+          />
 
-          {cameraError && <p className="camera-error">{cameraError}</p>}
-
-          <div className="camera-actions">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              hidden
-              onChange={handleImageFileChange}
-            />
-
+          <div className="camera-launch-row">
             <button
               type="button"
               className="primary-btn"
@@ -1032,43 +1056,107 @@ export default function App() {
                   ? 'Tomar foto del serial'
                   : isStartingCamera
                     ? 'Abriendo cámara...'
-                    : 'Abrir cámara guiada'}
+                    : 'Abrir cámara'}
               </span>
             </button>
-
-            {SHOW_UPLOAD_ACTION && (
-              <button
-                type="button"
-                className="secondary-btn"
-                disabled={isBusy}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <ImageUp size={20} />
-                <span>Probar con imagen</span>
-              </button>
-            )}
-
-            {isCameraActive && isTorchAvailable && (
-              <button
-                type="button"
-                className="secondary-btn"
-                disabled={isBusy}
-                onClick={() => void toggleTorch()}
-              >
-                {isTogglingTorch
-                  ? 'Cambiando flash...'
-                  : isTorchEnabled
-                    ? 'Apagar flash'
-                    : 'Encender flash'}
-              </button>
-            )}
-
-            {isCameraActive && (
-              <button type="button" className="secondary-btn" disabled={isBusy} onClick={stopCamera}>
-                Cerrar cámara
-              </button>
-            )}
           </div>
+
+          <form
+            className="manual-entry"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleManualSubmit();
+            }}
+          >
+            <div className="manual-entry-copy">
+              <span className="denomination-label">Entrada manual</span>
+              <small>Escribe el número de serie si no quieres usar la cámara.</small>
+            </div>
+
+            <div className="manual-entry-field">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                className="manual-entry-input"
+                value={manualSerialInput}
+                onChange={handleManualSerialChange}
+                placeholder="Ej. 12345678"
+                aria-label="Número de serie manual"
+                aria-invalid={manualInputError ? 'true' : 'false'}
+              />
+
+              <button
+                type="submit"
+                className="secondary-btn"
+                disabled={isBusy || manualSerialInput.length === 0}
+              >
+                Validar manualmente
+              </button>
+            </div>
+
+            {manualInputError ? (
+              <p className="manual-entry-error">{manualInputError}</p>
+            ) : (
+              <small className="manual-entry-hint">
+                Se validará contra los rangos reportados para Bs {selectedDenomination}.
+              </small>
+            )}
+          </form>
+
+          {isCameraActive && (
+            <div className="camera-stage-shell">
+              <div className="camera-stage">
+                <video ref={videoRef} className="camera-video" autoPlay muted playsInline />
+                <div className="camera-guide" />
+                <div className="camera-guide-label">Alinea el número de serie aquí</div>
+              </div>
+            </div>
+          )}
+
+          {cameraError && <p className="camera-error">{cameraError}</p>}
+
+          {(SHOW_UPLOAD_ACTION || isCameraActive) && (
+            <div className="camera-actions">
+              {SHOW_UPLOAD_ACTION && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={isBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <ImageUp size={20} />
+                  <span>Probar con imagen</span>
+                </button>
+              )}
+
+              {isCameraActive && isTorchAvailable && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={isBusy}
+                  onClick={() => void toggleTorch()}
+                >
+                  {isTogglingTorch
+                    ? 'Cambiando flash...'
+                    : isTorchEnabled
+                      ? 'Apagar flash'
+                      : 'Encender flash'}
+                </button>
+              )}
+
+              {isCameraActive && (
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  disabled={isBusy}
+                  onClick={stopCamera}
+                >
+                  Cerrar cámara
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
         {imageSrc && (

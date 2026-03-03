@@ -352,6 +352,87 @@ body {
   color: #ffffff;
 }
 
+.manual-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.85rem;
+  border: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.manual-entry-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem 0.75rem;
+}
+
+.manual-entry-copy small,
+.manual-entry-hint {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.manual-entry-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.manual-entry-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+  min-height: 3rem;
+  border: 1px solid rgba(107, 114, 128, 0.24);
+  border-radius: 0.7rem;
+  box-sizing: border-box;
+  padding: 0.75rem 1rem;
+  font: inherit;
+  font-size: 0.94rem;
+  color: var(--text-main);
+  background: #f9fafb;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.manual-entry-input:focus {
+  outline: none;
+  border-color: rgba(17, 24, 39, 0.45);
+  box-shadow: 0 0 0 3px rgba(17, 24, 39, 0.08);
+  background: #ffffff;
+}
+
+.manual-entry-input::placeholder {
+  color: #9ca3af;
+}
+
+.manual-entry-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.manual-entry-field .secondary-btn {
+  flex: 0 0 auto;
+  min-height: 3rem;
+  border-radius: 0.7rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+}
+
+.camera-launch-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .camera-badge {
   display: inline-flex;
   align-items: center;
@@ -437,6 +518,16 @@ body {
 .camera-actions .secondary-btn {
   flex: 0 0 auto;
   justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .manual-entry-field {
+    flex-direction: column;
+  }
+
+  .manual-entry-field .secondary-btn {
+    width: 100%;
+  }
 }
 
 .diagnostics-header {
