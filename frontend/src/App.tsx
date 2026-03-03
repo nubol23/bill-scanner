@@ -1073,49 +1073,6 @@ export default function App() {
             </button>
           </div>
 
-          <form
-            className="manual-entry"
-            onSubmit={(event) => {
-              event.preventDefault();
-              handleManualSubmit();
-            }}
-          >
-            <div className="manual-entry-copy">
-              <span className="denomination-label">Entrada manual</span>
-              <small>Escribe el número de serie si no quieres usar la cámara.</small>
-            </div>
-
-            <div className="manual-entry-field">
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="off"
-                className="manual-entry-input"
-                value={manualSerialInput}
-                onChange={handleManualSerialChange}
-                placeholder="Ej. 12345678"
-                aria-label="Número de serie manual"
-                aria-invalid={manualInputError ? 'true' : 'false'}
-              />
-
-              <button
-                type="submit"
-                className="secondary-btn"
-                disabled={isBusy || manualSerialInput.length === 0}
-              >
-                Validar manualmente
-              </button>
-            </div>
-
-            {manualInputError ? (
-              <p className="manual-entry-error">{manualInputError}</p>
-            ) : (
-              <small className="manual-entry-hint">
-                Se validará contra los rangos reportados para Bs {selectedDenomination}.
-              </small>
-            )}
-          </form>
-
           {isCameraActive && (
             <div className="camera-stage-shell">
               <div className="camera-stage">
@@ -1231,6 +1188,55 @@ export default function App() {
             <p>No se detectó un número de serie de 8 a 9 dígitos en la imagen enviada.</p>
           </div>
         )}
+
+        <section className="manual-entry-section" aria-labelledby="manual-entry-heading">
+          <div className="manual-entry-divider" aria-hidden="true" />
+
+          <form
+            className="manual-entry"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleManualSubmit();
+            }}
+          >
+            <div className="manual-entry-copy">
+              <span id="manual-entry-heading" className="denomination-label">
+                Entrada manual
+              </span>
+              <small>Escribe el número de serie si no quieres usar la cámara.</small>
+            </div>
+
+            <div className="manual-entry-field">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                className="manual-entry-input"
+                value={manualSerialInput}
+                onChange={handleManualSerialChange}
+                placeholder="Ej. 12345678"
+                aria-label="Número de serie manual"
+                aria-invalid={manualInputError ? 'true' : 'false'}
+              />
+
+              <button
+                type="submit"
+                className="secondary-btn"
+                disabled={isBusy || manualSerialInput.length === 0}
+              >
+                Validar manualmente
+              </button>
+            </div>
+
+            {manualInputError ? (
+              <p className="manual-entry-error">{manualInputError}</p>
+            ) : (
+              <small className="manual-entry-hint">
+                Se validará contra los rangos reportados para Bs {selectedDenomination}.
+              </small>
+            )}
+          </form>
+        </section>
       </main>
 
       <footer className="footer-copyright">
