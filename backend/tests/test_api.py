@@ -70,6 +70,18 @@ def test_recognize_returns_serial_payload():
   assert payload["candidates"][0]["text"] == "024613645"
 
 
+def test_recognize_returns_cors_header_for_allowed_origin():
+  client = TestClient(create_app(settings=_build_settings(), engine=StubEngine()))
+  response = client.post(
+    "/api/v1/recognize",
+    headers={"Origin": "http://127.0.0.1:4173"},
+    files={"image": ("serial.png", _png_bytes(), "image/png")},
+  )
+
+  assert response.status_code == 200
+  assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:4173"
+
+
 def test_rejects_unsupported_content_type():
   client = TestClient(create_app(settings=_build_settings(), engine=StubEngine()))
   response = client.post(

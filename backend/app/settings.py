@@ -8,15 +8,14 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = APP_DIR.parent
 MODELS_DIR = BACKEND_DIR / "models"
+DEFAULT_ALLOWED_ORIGINS = (
+  "https://billete.rafaelvillca.site",
+)
 
 
 def _parse_origins(raw_value: str | None) -> tuple[str, ...]:
   if not raw_value:
-    return (
-      "https://billete.rafaelvillca.site",
-      "http://127.0.0.1:4173",
-      "http://localhost:4173",
-    )
+    return DEFAULT_ALLOWED_ORIGINS
 
   return tuple(origin.strip() for origin in raw_value.split(",") if origin.strip())
 
