@@ -24,6 +24,7 @@ def _parse_origins(raw_value: str | None) -> tuple[str, ...]:
 class Settings:
   app_host: str
   app_port: int
+  database_url: str | None
   allowed_origins: tuple[str, ...]
   max_upload_bytes: int
   rate_limit_burst: int
@@ -52,6 +53,7 @@ class Settings:
     return cls(
       app_host=os.environ.get("APP_HOST", "127.0.0.1"),
       app_port=int(os.environ.get("APP_PORT", "8000")),
+      database_url=os.environ.get("APP_DATABASE_URL"),
       allowed_origins=_parse_origins(os.environ.get("APP_ALLOWED_ORIGINS")),
       max_upload_bytes=int(os.environ.get("APP_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024))),
       rate_limit_burst=int(os.environ.get("APP_RATE_LIMIT_BURST", "5")),

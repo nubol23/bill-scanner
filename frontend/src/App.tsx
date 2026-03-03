@@ -10,8 +10,23 @@ import {
 import {
   ScanApiError,
   scanSerialImage,
+  submitFeedback,
+  type RecognizeClientContext,
   type RecognizeResponse,
 } from "./lib/api";
+import { FeedbackModal } from "./components/FeedbackModal";
+import {
+  AnalyticsClient,
+  type AnalyticsEventInput,
+} from "./lib/analytics";
+import {
+  getClientIdentity,
+  getQualifyingScanCount,
+  recordQualifyingScan,
+  shouldPromptForFeedback,
+  snoozeFeedbackPrompt,
+  suppressFeedbackPrompt,
+} from "./lib/clientIdentity";
 
 const CAMERA_FRAME_WIDTH_RATIO = 0.8;
 const CAMERA_FRAME_HEIGHT_RATIO = 0.24;
@@ -21,6 +36,7 @@ const DERIVATIVE_JPEG_QUALITY = 0.92;
 type BillDenomination = "10" | "20" | "50";
 type ScanFeedback = "none" | "not-found";
 type ActiveMethod = "none" | "camera" | "manual";
+type FeedbackRating = "up" | "down";
 
 type TorchSettings = {
   torch?: boolean;
@@ -363,15 +379,85 @@ export default function App() {
   const [scanProgress, setScanProgress] = useState<LoadingProgressState | null>(
     null,
   );
+  const [latestQualifyingRequestId, setLatestQualifyingRequestId] = useState<
+    string | null
+  >(null);
+  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
+  const [pendingFeedbackPrompt, setPendingFeedbackPrompt] = useState(false);
+  const [selectedFeedbackRating, setSelectedFeedbackRating] =
+    useState<FeedbackRating | null>(null);
+  const [feedbackComment, setFeedbackComment] = useState("");
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const manualInputRef = useRef<HTMLInputElement>(null);
   const previewUrlRef = useRef<string | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const feedbackPromptTimeoutRef = useRef<number | null>(null);
+  const identityRef = useRef<ReturnType<typeof getClientIdentity> | null>(null);
+  const analyticsRef = useRef<AnalyticsClient | null>(null);
+
+  if (!identityRef.current) {
+    identityRef.current = getClientIdentity();
+  }
+
+  if (!analyticsRef.current) {
+    analyticsRef.current = new AnalyticsClient(identityRef.current!);
+  }
 
   const isBusy = isProcessing || isStartingCamera || isTogglingTorch;
   const canClearManual =
     manualSerialInput.length > 0 || results !== null || manualInputError !== null;
+  const clientIdentity = identityRef.current!;
+
+  function trackEvent(event: AnalyticsEventInput) {
+    analyticsRef.current?.track(event);
+  }
+
+  function clearFeedbackPromptTimer() {
+    if (feedbackPromptTimeoutRef.current !== null) {
+      window.clearTimeout(feedbackPromptTimeoutRef.current);
+      feedbackPromptTimeoutRef.current = null;
+    }
+  }
+
+  function resetFeedbackDialog() {
+    clearFeedbackPromptTimer();
+    setIsFeedbackOpen(false);
+    setPendingFeedbackPrompt(false);
+    setSelectedFeedbackRating(null);
+    setFeedbackComment("");
+    setFeedbackError(null);
+  }
+
+  function handleQualifyingScan(requestId: string | null) {
+    setLatestQualifyingRequestId(requestId);
+    recordQualifyingScan();
+    if (shouldPromptForFeedback()) {
+      setPendingFeedbackPrompt(true);
+    }
+  }
+
+  function buildRecognizeClientContext(torchEnabled: boolean): RecognizeClientContext {
+    return {
+      deviceId: clientIdentity.deviceId,
+      sessionId: clientIdentity.sessionId,
+      pageLoadId: clientIdentity.pageLoadId,
+      denomination: selectedDenomination,
+      torchEnabled,
+      clientStartedAt: new Date().toISOString(),
+    };
+  }
+
+  function handleDenominationSelect(denomination: BillDenomination) {
+    setSelectedDenomination(denomination);
+    trackEvent({
+      name: "denomination_selected",
+      denomination,
+      method: activeMethod === "none" ? null : activeMethod,
+    });
+  }
 
   function revokePreviewUrl() {
     if (previewUrlRef.current) {
@@ -483,6 +569,12 @@ export default function App() {
       } as MediaTrackConstraints);
       setIsTorchEnabled(nextTorchState);
       setCameraError(null);
+      trackEvent({
+        name: "torch_toggled",
+        denomination: selectedDenomination,
+        method: "camera",
+        outcome: nextTorchState ? "enabled" : "disabled",
+      });
     } catch {
       setCameraError("No se pudo cambiar el flash de la cámara.");
     } finally {
@@ -509,22 +601,53 @@ export default function App() {
     setCameraError(null);
   }
 
-  async function runRemoteScan(blob: Blob, label: string, detail?: string) {
+  async function runRemoteScan(
+    blob: Blob,
+    recognizeContext: RecognizeClientContext,
+    label: string,
+    detail?: string,
+  ) {
     setScanProgress({
       progress: null,
       label,
       detail,
     });
     await waitForNextPaint(1);
-    return scanSerialImage(blob);
+    return scanSerialImage(blob, recognizeContext);
   }
 
-  async function processDirectBlob(blob: Blob, label: string, detail?: string) {
+  async function processDirectBlob(
+    blob: Blob,
+    recognizeContext: RecognizeClientContext,
+    label: string,
+    detail?: string,
+  ) {
     setIsProcessing(true);
     try {
-      const response = await runRemoteScan(blob, label, detail);
+      const response = await runRemoteScan(
+        blob,
+        recognizeContext,
+        label,
+        detail,
+      );
+      handleQualifyingScan(response.request_id);
       await applyRecognizeResponse(response);
     } catch (error) {
+      if (error instanceof ScanApiError && error.status !== null) {
+        handleQualifyingScan(error.requestId);
+      }
+      if (
+        error instanceof ScanApiError &&
+        (error.kind === "timeout" || error.kind === "unavailable")
+      ) {
+        trackEvent({
+          name: "scan_client_error",
+          denomination: selectedDenomination,
+          method: "camera",
+          outcome: error.kind,
+          requestId: error.requestId,
+        });
+      }
       setResults(null);
       setScanFeedback("none");
       setCameraError(errorMessageForScan(error));
@@ -539,6 +662,12 @@ export default function App() {
       return;
     }
 
+    trackEvent({
+      name: "camera_open_requested",
+      denomination: selectedDenomination,
+      method: "camera",
+    });
+
     if (streamRef.current) {
       setCameraError(null);
       setIsCameraActive(true);
@@ -548,6 +677,12 @@ export default function App() {
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError("Tu navegador no permite abrir la cámara.");
+      trackEvent({
+        name: "camera_open_result",
+        denomination: selectedDenomination,
+        method: "camera",
+        outcome: "denied_or_failed",
+      });
       return;
     }
 
@@ -568,10 +703,22 @@ export default function App() {
       setIsCameraActive(true);
       setIsTorchEnabled(false);
       syncTorchAvailability();
+      trackEvent({
+        name: "camera_open_result",
+        denomination: selectedDenomination,
+        method: "camera",
+        outcome: "granted",
+      });
     } catch {
       setCameraError(
         "No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.",
       );
+      trackEvent({
+        name: "camera_open_result",
+        denomination: selectedDenomination,
+        method: "camera",
+        outcome: "denied_or_failed",
+      });
     } finally {
       setIsStartingCamera(false);
     }
@@ -589,6 +736,12 @@ export default function App() {
       );
       return;
     }
+
+    trackEvent({
+      name: "camera_capture_attempted",
+      denomination: selectedDenomination,
+      method: "camera",
+    });
 
     const guideRect = getCaptureGuideRect(video.videoWidth, video.videoHeight);
     const canvas = document.createElement("canvas");
@@ -623,12 +776,14 @@ export default function App() {
         throw new Error("No se pudo generar la captura.");
       }
 
+      const recognizeContext = buildRecognizeClientContext(isTorchEnabled);
       stopCamera();
       clearScanOutput();
       setPreviewFromBlob(previewBlob);
       setCameraError(null);
       await processDirectBlob(
         previewBlob,
+        recognizeContext,
         "Analizando imagen...",
         "captura guiada",
       );
@@ -690,6 +845,13 @@ export default function App() {
 
     resetFlowState();
     setActiveMethod(next);
+    if (next !== "none") {
+      trackEvent({
+        name: "method_selected",
+        denomination: selectedDenomination,
+        method: next,
+      });
+    }
   }
 
   function resetCameraFlow() {
@@ -700,6 +862,11 @@ export default function App() {
     resetFlowState();
     if (activeMethod !== "camera") {
       setActiveMethod("camera");
+      trackEvent({
+        name: "method_selected",
+        denomination: selectedDenomination,
+        method: "camera",
+      });
     }
     void startCamera();
   }
@@ -714,8 +881,69 @@ export default function App() {
     setManualSerialInput("");
     if (activeMethod !== "manual") {
       setActiveMethod("manual");
+      trackEvent({
+        name: "method_selected",
+        denomination: selectedDenomination,
+        method: "manual",
+      });
     }
     window.requestAnimationFrame(() => manualInputRef.current?.focus());
+  }
+
+  function handleRetryCameraFlow() {
+    trackEvent({
+      name: "retry_used",
+      denomination: selectedDenomination,
+      method: "camera",
+      requestId: latestQualifyingRequestId,
+    });
+    resetCameraFlow();
+  }
+
+  function handleFallbackToManual() {
+    trackEvent({
+      name: "fallback_used",
+      denomination: selectedDenomination,
+      method: "camera",
+      requestId: latestQualifyingRequestId,
+    });
+    resetManualFlow();
+  }
+
+  async function handleFeedbackSubmit() {
+    if (!selectedFeedbackRating || isSubmittingFeedback) {
+      return;
+    }
+
+    setIsSubmittingFeedback(true);
+    setFeedbackError(null);
+
+    try {
+      await submitFeedback({
+        deviceId: clientIdentity.deviceId,
+        sessionId: clientIdentity.sessionId,
+        pageLoadId: clientIdentity.pageLoadId,
+        requestId: latestQualifyingRequestId,
+        rating: selectedFeedbackRating,
+        comment: feedbackComment.trim() || null,
+        promptedAfterScanCount: getQualifyingScanCount(),
+      });
+      suppressFeedbackPrompt();
+      resetFeedbackDialog();
+    } catch {
+      setFeedbackError("No se pudo enviar el comentario. Intenta de nuevo.");
+    } finally {
+      setIsSubmittingFeedback(false);
+    }
+  }
+
+  function handleFeedbackDismiss() {
+    if (isSubmittingFeedback) {
+      return;
+    }
+
+    snoozeFeedbackPrompt();
+    resetFeedbackDialog();
   }
 
   useEffect(() => {
@@ -745,11 +973,19 @@ export default function App() {
 
   useEffect(
     () => () => {
+      clearFeedbackPromptTimer();
+      analyticsRef.current?.dispose();
       stopCamera();
       revokePreviewUrl();
     },
     [],
   );
+
+  useEffect(() => {
+    analyticsRef.current?.track({
+      name: "app_opened",
+    });
+  }, []);
 
   useEffect(() => {
     if (isProcessing || (results === null && scanFeedback === "none")) {
@@ -780,6 +1016,39 @@ export default function App() {
     });
   }, [selectedDenomination]);
 
+  useEffect(() => {
+    if (
+      isProcessing ||
+      !pendingFeedbackPrompt ||
+      isFeedbackOpen ||
+      isSubmittingFeedback
+    ) {
+      return;
+    }
+
+    if (results === null && !cameraError) {
+      return;
+    }
+
+    clearFeedbackPromptTimer();
+    feedbackPromptTimeoutRef.current = window.setTimeout(() => {
+      setIsFeedbackOpen(true);
+      setPendingFeedbackPrompt(false);
+      feedbackPromptTimeoutRef.current = null;
+    }, 800);
+
+    return () => {
+      clearFeedbackPromptTimer();
+    };
+  }, [
+    cameraError,
+    isFeedbackOpen,
+    isProcessing,
+    isSubmittingFeedback,
+    pendingFeedbackPrompt,
+    results,
+  ]);
+
   return (
     <div className="container">
       <header className="app-header">
@@ -803,7 +1072,7 @@ export default function App() {
                 type="button"
                 className={`denomination-chip ${selectedDenomination === denomination ? 'active' : ''}`}
                 aria-pressed={selectedDenomination === denomination}
-                onClick={() => setSelectedDenomination(denomination)}
+                onClick={() => handleDenominationSelect(denomination)}
               >
                 Bs {denomination}
               </button>
@@ -883,7 +1152,7 @@ export default function App() {
                       <button
                         type="button"
                         className="primary-btn"
-                        onClick={resetCameraFlow}
+                        onClick={handleRetryCameraFlow}
                       >
                         <Camera size={18} />
                         <span>Reintentar con cámara</span>
@@ -891,7 +1160,7 @@ export default function App() {
                       <button
                         type="button"
                         className="secondary-btn"
-                        onClick={resetManualFlow}
+                        onClick={handleFallbackToManual}
                       >
                         <Keyboard size={18} />
                         <span>Ingresar manualmente</span>
@@ -927,7 +1196,7 @@ export default function App() {
                       <button
                         type="button"
                         className="primary-btn error-retry-btn"
-                        onClick={resetCameraFlow}
+                        onClick={handleRetryCameraFlow}
                       >
                         <Camera size={18} />
                         <span>Reintentar con cámara</span>
@@ -935,7 +1204,7 @@ export default function App() {
                       <button
                         type="button"
                         className="secondary-btn"
-                        onClick={resetManualFlow}
+                        onClick={handleFallbackToManual}
                       >
                         <Keyboard size={18} />
                         <span>Entrada manual</span>
@@ -1142,6 +1411,18 @@ export default function App() {
           </div>
         )}
       </main>
+
+      <FeedbackModal
+        open={isFeedbackOpen}
+        rating={selectedFeedbackRating}
+        comment={feedbackComment}
+        isSubmitting={isSubmittingFeedback}
+        errorMessage={feedbackError}
+        onClose={handleFeedbackDismiss}
+        onCommentChange={(value) => setFeedbackComment(value)}
+        onRatingChange={(rating) => setSelectedFeedbackRating(rating)}
+        onSubmit={() => void handleFeedbackSubmit()}
+      />
 
       <footer className="footer-copyright">
         <a
