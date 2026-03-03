@@ -848,7 +848,7 @@ export default function App() {
                   disabled={isBusy}
                   onClick={resetManualFlow}
                 >
-                  Manual
+                  Entrada manual
                 </button>
               </div>
             </div>
@@ -1059,7 +1059,7 @@ export default function App() {
                   disabled={isBusy}
                   onClick={resetCameraFlow}
                 >
-                  Cámara
+                  Usar cámara
                 </button>
               </div>
             </div>
