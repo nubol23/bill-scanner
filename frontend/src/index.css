@@ -644,12 +644,28 @@ body {
   gap: 0.75rem;
 }
 
-.manual-submit-btn {
+.manual-entry-actions {
   flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.manual-entry-actions .secondary-btn,
+.manual-entry-actions .primary-btn {
   min-height: 3rem;
   border-radius: 0.7rem;
+}
+
+.manual-submit-btn {
+  flex: 1 1 auto;
   padding: 0.75rem 1.2rem;
   font-size: 0.9rem;
+}
+
+.manual-clear-btn {
+  flex: 0 0 auto;
+  min-width: 5.75rem;
 }
 
 /* ── Error container ── */
@@ -856,6 +872,22 @@ body {
     flex-direction: column;
   }
 
+  .manual-entry-input {
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 2.85rem;
+  }
+
+  .manual-entry-actions {
+    width: 100%;
+  }
+
+  .manual-entry-actions .secondary-btn,
+  .manual-entry-actions .primary-btn {
+    flex: 1 1 0;
+    width: auto;
+  }
+
   .manual-entry-field .primary-btn,
   .flow-inline-actions .primary-btn,
   .flow-inline-actions .secondary-btn {
@@ -864,6 +896,11 @@ body {
 
   .manual-entry-field .secondary-btn {
     width: 100%;
+  }
+
+  .manual-entry-actions .secondary-btn,
+  .manual-entry-actions .primary-btn {
+    width: auto;
   }
 }
 

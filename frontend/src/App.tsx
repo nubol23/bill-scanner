@@ -331,6 +331,8 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
 
   const isBusy = isProcessing || isStartingCamera || isTogglingTorch;
+  const canClearManual =
+    manualSerialInput.length > 0 || results !== null || manualInputError !== null;
 
   function revokePreviewUrl() {
     if (previewUrlRef.current) {
@@ -1042,13 +1044,23 @@ export default function App() {
                   aria-label="Número de serie manual"
                   aria-invalid={manualInputError ? 'true' : 'false'}
                 />
-                <button
-                  type="submit"
-                  className="primary-btn manual-submit-btn"
-                  disabled={isBusy || manualSerialInput.length === 0}
-                >
-                  Revisar
-                </button>
+                <div className="manual-entry-actions">
+                  <button
+                    type="submit"
+                    className="primary-btn manual-submit-btn"
+                    disabled={isBusy || manualSerialInput.length === 0}
+                  >
+                    Revisar
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-btn manual-clear-btn"
+                    disabled={isBusy || !canClearManual}
+                    onClick={resetManualFlow}
+                  >
+                    Limpiar
+                  </button>
+                </div>
               </div>
 
               {manualInputError ? (
@@ -1068,18 +1080,6 @@ export default function App() {
                     denomination={selectedDenomination}
                   />
                 ))}
-              </div>
-            )}
-
-            {results !== null && (
-              <div className="section-links section-links-centered">
-                <button
-                  type="button"
-                  className="flow-text-link"
-                  onClick={resetManualFlow}
-                >
-                  Otro serial
-                </button>
               </div>
             )}
           </section>
