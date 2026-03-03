@@ -14,7 +14,7 @@ import {
 } from "./lib/api";
 
 const CAMERA_FRAME_WIDTH_RATIO = 0.8;
-const CAMERA_FRAME_HEIGHT_RATIO = 0.22;
+const CAMERA_FRAME_HEIGHT_RATIO = 0.24;
 const CAMERA_PREVIEW_ASPECT_RATIO = 16 / 9;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
 
@@ -346,7 +346,7 @@ function errorMessageForScan(error: unknown) {
 
 export default function App() {
   const [selectedDenomination, setSelectedDenomination] =
-    useState<BillDenomination>("50");
+    useState<BillDenomination>("10");
   const [activeMethod, setActiveMethod] = useState<ActiveMethod>("none");
   const [manualSerialInput, setManualSerialInput] = useState("");
   const [manualInputError, setManualInputError] = useState<string | null>(null);
@@ -968,46 +968,56 @@ export default function App() {
             ) : (
               /* Camera viewport */
               <>
-                <div className="camera-launch-row">
-                  <button
-                    type="button"
-                    className="primary-btn"
-                    disabled={isBusy}
-                    onClick={() => {
-                      if (isCameraActive) {
-                        void captureCameraFrame();
-                      } else {
+                {!isCameraActive && (
+                  <div className="camera-launch-row">
+                    <button
+                      type="button"
+                      className="primary-btn"
+                      disabled={isBusy}
+                      onClick={() => {
                         void startCamera();
-                      }
-                    }}
-                  >
-                    <Camera size={20} />
-                    <span>
-                      {isCameraActive
-                        ? 'Tomar foto del serial'
-                        : isStartingCamera
-                          ? 'Abriendo cámara...'
-                          : 'Abrir cámara'}
-                    </span>
-                  </button>
-                </div>
+                      }}
+                    >
+                      <Camera size={20} />
+                      <span>
+                        {isStartingCamera ? 'Abriendo cámara...' : 'Abrir cámara'}
+                      </span>
+                    </button>
+                  </div>
+                )}
 
                 {isCameraActive && (
-                  <div className="camera-stage-shell">
-                    <div className="camera-stage">
-                      <video
-                        ref={videoRef}
-                        className="camera-video"
-                        autoPlay
-                        muted
-                        playsInline
-                      />
-                      <div className="camera-guide" />
-                      <div className="camera-guide-label">
-                        Alinea el número de serie aquí
+                  <>
+                    <div className="camera-stage-shell">
+                      <div className="camera-stage">
+                        <video
+                          ref={videoRef}
+                          className="camera-video"
+                          autoPlay
+                          muted
+                          playsInline
+                        />
+                        <div className="camera-guide" />
+                        <div className="camera-guide-label">
+                          Alinea el número de serie aquí
+                        </div>
                       </div>
                     </div>
-                  </div>
+
+                    <div className="camera-capture-row">
+                      <button
+                        type="button"
+                        className="primary-btn"
+                        disabled={isBusy}
+                        onClick={() => {
+                          void captureCameraFrame();
+                        }}
+                      >
+                        <Camera size={20} />
+                        <span>Tomar foto del serial</span>
+                      </button>
+                    </div>
+                  </>
                 )}
 
                 {cameraError && <p className="camera-error">{cameraError}</p>}
