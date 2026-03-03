@@ -803,10 +803,10 @@ body {
 
 .camera-guide {
   position: absolute;
-  top: 41%;
+  top: 39%;
   left: 10%;
   width: 80%;
-  height: 18%;
+  height: 22%;
   border: 2px solid rgba(255, 255, 255, 0.95);
   border-radius: 1rem;
   box-shadow: 0 0 0 9999px rgba(17, 24, 39, 0.45);
@@ -815,7 +815,7 @@ body {
 
 .camera-guide-label {
   position: absolute;
-  top: 34%;
+  top: 33%;
   left: 0;
   right: 0;
   color: #ffffff;
@@ -1066,15 +1066,15 @@ body {
   }
 
   .camera-guide {
-    top: 42%;
-    left: 8%;
-    width: 84%;
-    height: 16%;
+    top: 39%;
+    left: 10%;
+    width: 80%;
+    height: 22%;
     border-radius: 0.9rem;
   }
 
   .camera-guide-label {
-    top: 35%;
+    top: 33.5%;
     font-size: 0.78rem;
   }
 

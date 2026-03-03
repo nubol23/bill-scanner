@@ -13,8 +13,8 @@ import {
   type RecognizeResponse,
 } from "./lib/api";
 
-const CAMERA_FRAME_WIDTH_RATIO = 0.78;
-const CAMERA_FRAME_HEIGHT_RATIO = 0.18;
+const CAMERA_FRAME_WIDTH_RATIO = 0.8;
+const CAMERA_FRAME_HEIGHT_RATIO = 0.22;
 const CAMERA_PREVIEW_ASPECT_RATIO = 16 / 9;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
 
