@@ -23,7 +23,23 @@ export type ScanApiErrorKind =
   | 'server';
 
 const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8000';
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, '');
+
+function resolveApiBaseUrl(rawBaseUrl?: string) {
+  const configuredBaseUrl = rawBaseUrl?.trim();
+  if (configuredBaseUrl) {
+    return configuredBaseUrl.replace(/\/$/, '');
+  }
+
+  // In local dev, prefer Vite's same-origin proxy so camera/upload flows do not
+  // depend on the current dev port being whitelisted by the backend.
+  if (import.meta.env.DEV) {
+    return '';
+  }
+
+  return DEFAULT_API_BASE_URL;
+}
+
+const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 
 export class ScanApiError extends Error {
   kind: ScanApiErrorKind;

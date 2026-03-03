@@ -1,41 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
-import { Camera, CheckCircle2, ImageUp, Loader2, XCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from "react";
+import {
+  Camera,
+  CheckCircle2,
+  Keyboard,
+  Loader2,
+  XCircle,
+} from "lucide-react";
 
-import { ScanApiError, scanSerialImage, type RecognizeResponse } from './lib/api';
+import {
+  ScanApiError,
+  scanSerialImage,
+  type RecognizeResponse,
+} from "./lib/api";
 
 const CAMERA_FRAME_WIDTH_RATIO = 0.78;
 const CAMERA_FRAME_HEIGHT_RATIO = 0.18;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
-const FOREGROUND_ANALYSIS_MAX_SIDE = 256;
-const FOREGROUND_COLOR_DISTANCE_THRESHOLD = 44;
-const FOREGROUND_CHROMA_THRESHOLD = 20;
-const ACCEPTED_CONFIDENCE_THRESHOLD = 0.75;
-const SHOW_UPLOAD_ACTION = false;
 
-type RelativeCropPreset = {
-  id: string;
-  label: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-type CropRect = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-type UploadCropCandidate = {
-  id: string;
-  label: string;
-  rect: CropRect;
-};
-
-type BillDenomination = '10' | '20' | '50';
-type ScanFeedback = 'none' | 'not-found';
+type BillDenomination = "10" | "20" | "50";
+type ScanFeedback = "none" | "not-found";
+type ActiveMethod = "none" | "camera" | "manual";
 
 type TorchSettings = {
   torch?: boolean;
@@ -59,32 +43,17 @@ type LoadingProgressState = {
   detail?: string;
 };
 
-const UPLOAD_SCAN_PRESETS: readonly RelativeCropPreset[] = [
-  {
-    id: 'top-right-band',
-    label: 'banda superior derecha',
-    x: 0.4,
-    y: 0,
-    width: 0.56,
-    height: 0.1,
-  },
-  {
-    id: 'bottom-left-band',
-    label: 'banda inferior izquierda',
-    x: 0,
-    y: 0.82,
-    width: 0.56,
-    height: 0.1,
-  },
-] as const;
-
-const BILL_DENOMINATIONS = ['10', '20', '50'] as const satisfies readonly BillDenomination[];
+const BILL_DENOMINATIONS = [
+  "10",
+  "20",
+  "50",
+] as const satisfies readonly BillDenomination[];
 
 const INVALID_RANGES_BY_DENOMINATION: Record<
   BillDenomination,
   ReadonlyArray<readonly [number, number]>
 > = {
-  '10': [
+  "10": [
     [77100001, 77550000],
     [78000001, 78450000],
     [78900001, 96350000],
@@ -98,7 +67,7 @@ const INVALID_RANGES_BY_DENOMINATION: Record<
     [108050001, 108500000],
     [109400001, 109850000],
   ],
-  '20': [
+  "20": [
     [87280145, 91646549],
     [96650001, 97100000],
     [99800001, 100250000],
@@ -116,7 +85,7 @@ const INVALID_RANGES_BY_DENOMINATION: Record<
     [119150001, 119600000],
     [120500001, 120950000],
   ],
-  '50': [
+  "50": [
     [67250001, 67700000],
     [69050001, 69500000],
     [69500001, 69950000],
@@ -134,24 +103,28 @@ function clampProgress(value: number) {
   return Math.max(0, Math.min(100, value));
 }
 
-function clampCropValue(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function LoadingProgressBar({ progress }: { progress: LoadingProgressState | null }) {
+function LoadingProgressBar({
+  progress,
+}: {
+  progress: LoadingProgressState | null;
+}) {
   if (!progress) {
     return null;
   }
 
   const normalizedProgress =
-    typeof progress.progress === 'number' ? clampProgress(progress.progress) : null;
+    typeof progress.progress === "number"
+      ? clampProgress(progress.progress)
+      : null;
 
   return (
     <div className="progress-panel" role="status" aria-live="polite">
       <div className="progress-meta">
         <span className="progress-label">{progress.label}</span>
         {normalizedProgress !== null && (
-          <span className="progress-value">{Math.round(normalizedProgress)}%</span>
+          <span className="progress-value">
+            {Math.round(normalizedProgress)}%
+          </span>
         )}
       </div>
       {normalizedProgress !== null && (
@@ -163,10 +136,59 @@ function LoadingProgressBar({ progress }: { progress: LoadingProgressState | nul
           aria-valuenow={normalizedProgress}
           aria-valuetext={`${Math.round(normalizedProgress)}%`}
         >
-          <div className="progress-fill" style={{ width: `${normalizedProgress}%` }} />
+          <div
+            className="progress-fill"
+            style={{ width: `${normalizedProgress}%` }}
+          />
         </div>
       )}
-      {progress.detail && <small className="progress-detail">{progress.detail}</small>}
+      {progress.detail && (
+        <small className="progress-detail">{progress.detail}</small>
+      )}
+    </div>
+  );
+}
+
+function SerialResultCard({
+  result,
+  denomination,
+}: {
+  result: SerialResult;
+  denomination: BillDenomination;
+}) {
+  return (
+    <div className={`result-card ${result.isValid ? "valid" : "invalid"}`}>
+      {result.isValid ? (
+        <>
+          <CheckCircle2 size={48} className="icon-valid" />
+          <h2>Billete de Bs {denomination} Válido</h2>
+          <p className="serial-code">{result.serialDisplay}</p>
+          {shouldShowSeriesWarning(result.series) && (
+            <p className="series-warning-chip">
+              El billete parece no ser de la serie B
+            </p>
+          )}
+          <p>
+            No pertenece a los rangos reportados por el BCB para billetes de Bs{" "}
+            {denomination}.
+          </p>
+        </>
+      ) : (
+        <>
+          <XCircle size={48} className="icon-invalid" />
+          <h2>Billete de Bs {denomination} Inválido</h2>
+          <p className="serial-code">{result.serialDisplay}</p>
+          {shouldShowSeriesWarning(result.series) && (
+            <p className="series-warning-chip">
+              El billete parece no ser de la serie B
+            </p>
+          )}
+          <p>
+            ¡Cuidado! Pertenece a un lote reportado robado por el BCB para
+            billetes de Bs {denomination}.
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -188,7 +210,10 @@ function waitForNextPaint(frames = 1) {
 
 function getCaptureGuideRect(width: number, height: number) {
   const guideWidth = Math.max(1, Math.round(width * CAMERA_FRAME_WIDTH_RATIO));
-  const guideHeight = Math.max(1, Math.round(height * CAMERA_FRAME_HEIGHT_RATIO));
+  const guideHeight = Math.max(
+    1,
+    Math.round(height * CAMERA_FRAME_HEIGHT_RATIO),
+  );
 
   return {
     x: Math.max(0, Math.round((width - guideWidth) / 2)),
@@ -198,250 +223,12 @@ function getCaptureGuideRect(width: number, height: number) {
   };
 }
 
-function resolveRelativeCropRect(
-  width: number,
-  height: number,
-  preset: RelativeCropPreset,
-  baseRect?: CropRect,
-): CropRect {
-  const area = baseRect ?? {
-    x: 0,
-    y: 0,
-    width,
-    height,
-  };
-  const x = clampCropValue(area.x + Math.round(area.width * preset.x), 0, Math.max(0, width - 1));
-  const y = clampCropValue(area.y + Math.round(area.height * preset.y), 0, Math.max(0, height - 1));
-  const maxWidth = Math.max(1, area.x + area.width - x);
-  const maxHeight = Math.max(1, area.y + area.height - y);
-
-  return {
-    x,
-    y,
-    width: clampCropValue(Math.round(area.width * preset.width), 1, maxWidth),
-    height: clampCropValue(Math.round(area.height * preset.height), 1, maxHeight),
-  };
-}
-
-function getAveragePatchColor(
-  data: Uint8ClampedArray,
-  width: number,
-  startX: number,
-  startY: number,
-  patchWidth: number,
-  patchHeight: number,
-) {
-  let redSum = 0;
-  let greenSum = 0;
-  let blueSum = 0;
-  let count = 0;
-
-  for (let y = startY; y < startY + patchHeight; y += 1) {
-    for (let x = startX; x < startX + patchWidth; x += 1) {
-      const pixelIndex = (y * width + x) * 4;
-      redSum += data[pixelIndex];
-      greenSum += data[pixelIndex + 1];
-      blueSum += data[pixelIndex + 2];
-      count += 1;
-    }
-  }
-
-  if (count === 0) {
-    return { red: 0, green: 0, blue: 0 };
-  }
-
-  return {
-    red: redSum / count,
-    green: greenSum / count,
-    blue: blueSum / count,
-  };
-}
-
-function estimateForegroundBounds(source: ImageBitmap) {
-  const scale = Math.min(1, FOREGROUND_ANALYSIS_MAX_SIDE / Math.max(source.width, source.height));
-  const analysisWidth = Math.max(1, Math.round(source.width * scale));
-  const analysisHeight = Math.max(1, Math.round(source.height * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = analysisWidth;
-  canvas.height = analysisHeight;
-  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
-
-  if (!context) {
-    releaseCanvas(canvas);
-    return null;
-  }
-
-  context.drawImage(source, 0, 0, analysisWidth, analysisHeight);
-  const { data } = context.getImageData(0, 0, analysisWidth, analysisHeight);
-  const patchSize = Math.max(6, Math.round(Math.min(analysisWidth, analysisHeight) * 0.08));
-  const patches = [
-    getAveragePatchColor(data, analysisWidth, 0, 0, patchSize, patchSize),
-    getAveragePatchColor(data, analysisWidth, analysisWidth - patchSize, 0, patchSize, patchSize),
-    getAveragePatchColor(
-      data,
-      analysisWidth,
-      0,
-      analysisHeight - patchSize,
-      patchSize,
-      patchSize,
-    ),
-    getAveragePatchColor(
-      data,
-      analysisWidth,
-      analysisWidth - patchSize,
-      analysisHeight - patchSize,
-      patchSize,
-      patchSize,
-    ),
-  ];
-
-  const background = patches.reduce(
-    (current, patch) => ({
-      red: current.red + patch.red,
-      green: current.green + patch.green,
-      blue: current.blue + patch.blue,
-    }),
-    { red: 0, green: 0, blue: 0 },
-  );
-
-  const backgroundRed = background.red / patches.length;
-  const backgroundGreen = background.green / patches.length;
-  const backgroundBlue = background.blue / patches.length;
-
-  let left = analysisWidth;
-  let top = analysisHeight;
-  let right = -1;
-  let bottom = -1;
-  let foregroundCount = 0;
-
-  for (let y = 0; y < analysisHeight; y += 1) {
-    for (let x = 0; x < analysisWidth; x += 1) {
-      const pixelIndex = (y * analysisWidth + x) * 4;
-      const red = data[pixelIndex];
-      const green = data[pixelIndex + 1];
-      const blue = data[pixelIndex + 2];
-      const colorDistance =
-        Math.abs(red - backgroundRed) +
-        Math.abs(green - backgroundGreen) +
-        Math.abs(blue - backgroundBlue);
-      const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
-
-      if (
-        colorDistance < FOREGROUND_COLOR_DISTANCE_THRESHOLD &&
-        chroma < FOREGROUND_CHROMA_THRESHOLD
-      ) {
-        continue;
-      }
-
-      foregroundCount += 1;
-      left = Math.min(left, x);
-      top = Math.min(top, y);
-      right = Math.max(right, x);
-      bottom = Math.max(bottom, y);
-    }
-  }
-
-  releaseCanvas(canvas);
-
-  if (foregroundCount === 0 || right <= left || bottom <= top) {
-    return null;
-  }
-
-  const widthCoverage = (right - left + 1) / analysisWidth;
-  const heightCoverage = (bottom - top + 1) / analysisHeight;
-  if (widthCoverage < 0.2 || heightCoverage < 0.15) {
-    return null;
-  }
-
-  const paddingX = Math.max(4, Math.round((right - left + 1) * 0.08));
-  const paddingY = Math.max(4, Math.round((bottom - top + 1) * 0.12));
-  const paddedLeft = clampCropValue(left - paddingX, 0, Math.max(0, analysisWidth - 1));
-  const paddedTop = clampCropValue(top - paddingY, 0, Math.max(0, analysisHeight - 1));
-  const paddedRight = clampCropValue(right + paddingX, paddedLeft + 1, analysisWidth);
-  const paddedBottom = clampCropValue(bottom + paddingY, paddedTop + 1, analysisHeight);
-
-  return {
-    x: clampCropValue(Math.floor(paddedLeft / scale), 0, Math.max(0, source.width - 1)),
-    y: clampCropValue(Math.floor(paddedTop / scale), 0, Math.max(0, source.height - 1)),
-    width: clampCropValue(Math.ceil((paddedRight - paddedLeft) / scale), 1, source.width),
-    height: clampCropValue(Math.ceil((paddedBottom - paddedTop) / scale), 1, source.height),
-  };
-}
-
-function getUploadCropCandidates(width: number, height: number, baseRect?: CropRect) {
-  const activeRect = baseRect ?? { x: 0, y: 0, width, height };
-  const stripAspectRatio = activeRect.width / Math.max(1, activeRect.height);
-  const hasForegroundCrop =
-    activeRect.x > 0 ||
-    activeRect.y > 0 ||
-    activeRect.width < width ||
-    activeRect.height < height;
-
-  const foregroundCandidate = hasForegroundCrop
-    ? ({
-        id: 'foreground-bounds',
-        label: 'texto detectado',
-        rect: activeRect,
-      } satisfies UploadCropCandidate)
-    : null;
-
-  const stripTopBandCandidate =
-    stripAspectRatio >= 2.3
-      ? ({
-          id: 'strip-top-band',
-          label: 'franja superior del serial',
-          rect: {
-            x: activeRect.x,
-            y: activeRect.y,
-            width: activeRect.width,
-            height: clampCropValue(
-              Math.round(activeRect.height * 0.68),
-              1,
-              Math.max(1, height - activeRect.y),
-            ),
-          },
-        } satisfies UploadCropCandidate)
-      : null;
-
-  const guideWidth = Math.max(1, Math.round(activeRect.width * CAMERA_FRAME_WIDTH_RATIO));
-  const guideHeight = Math.max(1, Math.round(activeRect.height * CAMERA_FRAME_HEIGHT_RATIO));
-  const guideRect = {
-    x: clampCropValue(
-      activeRect.x + Math.round((activeRect.width - guideWidth) / 2),
-      0,
-      Math.max(0, width - 1),
-    ),
-    y: clampCropValue(
-      activeRect.y + Math.round((activeRect.height - guideHeight) / 2),
-      0,
-      Math.max(0, height - 1),
-    ),
-    width: clampCropValue(guideWidth, 1, Math.max(1, width - activeRect.x)),
-    height: clampCropValue(guideHeight, 1, Math.max(1, height - activeRect.y)),
-  };
-
-  return [
-    ...(foregroundCandidate ? [foregroundCandidate] : []),
-    ...(stripTopBandCandidate ? [stripTopBandCandidate] : []),
-    ...UPLOAD_SCAN_PRESETS.map<UploadCropCandidate>((preset) => ({
-      id: preset.id,
-      label: preset.label,
-      rect: resolveRelativeCropRect(width, height, preset, activeRect),
-    })),
-    {
-      id: 'center-guide',
-      label: 'guía central',
-      rect: guideRect,
-    },
-  ] satisfies UploadCropCandidate[];
-}
-
 function releaseCanvas(canvas: HTMLCanvasElement | null) {
   if (!canvas) {
     return;
   }
 
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext("2d");
   if (context) {
     context.clearRect(0, 0, canvas.width, canvas.height);
   }
@@ -452,51 +239,20 @@ function releaseCanvas(canvas: HTMLCanvasElement | null) {
 
 function canvasToBlob(canvas: HTMLCanvasElement) {
   return new Promise<Blob | null>((resolve) => {
-    canvas.toBlob(resolve, 'image/jpeg', DERIVATIVE_JPEG_QUALITY);
+    canvas.toBlob(resolve, "image/jpeg", DERIVATIVE_JPEG_QUALITY);
   });
 }
 
-async function createCroppedBlob(source: ImageBitmap, rect: CropRect) {
-  const canvas = document.createElement('canvas');
-  canvas.width = rect.width;
-  canvas.height = rect.height;
-  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
-
-  if (!context) {
-    releaseCanvas(canvas);
-    throw new Error('No se pudo preparar el recorte.');
-  }
-
-  context.drawImage(
-    source,
-    rect.x,
-    rect.y,
-    rect.width,
-    rect.height,
-    0,
-    0,
-    rect.width,
-    rect.height,
-  );
-
-  try {
-    const blob = await canvasToBlob(canvas);
-    if (!blob) {
-      throw new Error('No se pudo generar la imagen recortada.');
-    }
-    return blob;
-  } finally {
-    releaseCanvas(canvas);
-  }
-}
-
 function extractSerialNumber(serialDisplay: string) {
-  const numericText = serialDisplay.replace(/[^0-9]/g, '');
+  const numericText = serialDisplay.replace(/[^0-9]/g, "");
   const serialNumeric = Number(numericText);
   return Number.isFinite(serialNumeric) ? serialNumeric : null;
 }
 
-function isReportedAsInvalid(serialNumeric: number, denomination: BillDenomination) {
+function isReportedAsInvalid(
+  serialNumeric: number,
+  denomination: BillDenomination,
+) {
   return INVALID_RANGES_BY_DENOMINATION[denomination].some(
     ([min, max]) => serialNumeric >= min && serialNumeric <= max,
   );
@@ -523,42 +279,22 @@ function toSerialResult(
 }
 
 function shouldShowSeriesWarning(series: string | null) {
-  return Boolean(series && series !== 'B');
-}
-
-function bestResponse(
-  current: RecognizeResponse | null,
-  next: RecognizeResponse,
-): RecognizeResponse {
-  if (!current) {
-    return next;
-  }
-
-  const currentConfidence = current.confidence ?? 0;
-  const nextConfidence = next.confidence ?? 0;
-  if (nextConfidence > currentConfidence) {
-    return next;
-  }
-  if (nextConfidence === currentConfidence && !current.series && next.series) {
-    return next;
-  }
-
-  return current;
+  return Boolean(series && series !== "B");
 }
 
 function errorMessageForScan(error: unknown) {
   if (error instanceof ScanApiError) {
     switch (error.kind) {
-      case 'timeout':
+      case "timeout":
         return error.message;
-      case 'unavailable':
+      case "unavailable":
         return error.message;
-      case 'rate-limited':
-        return 'El servicio está recibiendo muchas solicitudes. Espera unos segundos.';
-      case 'invalid-image':
+      case "rate-limited":
+        return "El servicio está recibiendo muchas solicitudes. Espera unos segundos.";
+      case "invalid-image":
         return error.message;
       default:
-        return 'No se pudo completar el análisis. Intenta de nuevo en unos segundos.';
+        return "No se pudo completar el análisis. Intenta de nuevo en unos segundos.";
     }
   }
 
@@ -566,12 +302,14 @@ function errorMessageForScan(error: unknown) {
     return error.message;
   }
 
-  return 'No se pudo completar el análisis remoto.';
+  return "No se pudo completar el análisis remoto.";
 }
 
 export default function App() {
-  const [selectedDenomination, setSelectedDenomination] = useState<BillDenomination>('50');
-  const [manualSerialInput, setManualSerialInput] = useState('');
+  const [selectedDenomination, setSelectedDenomination] =
+    useState<BillDenomination>("50");
+  const [activeMethod, setActiveMethod] = useState<ActiveMethod>("none");
+  const [manualSerialInput, setManualSerialInput] = useState("");
   const [manualInputError, setManualInputError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -582,11 +320,13 @@ export default function App() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [results, setResults] = useState<SerialResult[] | null>(null);
-  const [scanFeedback, setScanFeedback] = useState<ScanFeedback>('none');
-  const [scanProgress, setScanProgress] = useState<LoadingProgressState | null>(null);
+  const [scanFeedback, setScanFeedback] = useState<ScanFeedback>("none");
+  const [scanProgress, setScanProgress] = useState<LoadingProgressState | null>(
+    null,
+  );
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const manualInputRef = useRef<HTMLInputElement>(null);
   const previewUrlRef = useRef<string | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -606,10 +346,22 @@ export default function App() {
     setImageSrc(previewUrl);
   }
 
+  function clearPreview() {
+    revokePreviewUrl();
+    setImageSrc(null);
+  }
+
   function clearScanOutput() {
     setResults(null);
-    setScanFeedback('none');
+    setScanFeedback("none");
     setManualInputError(null);
+  }
+
+  function resetFlowState() {
+    clearScanOutput();
+    clearPreview();
+    setScanProgress(null);
+    setCameraError(null);
   }
 
   function stopCamera() {
@@ -638,22 +390,26 @@ export default function App() {
       return null;
     }
 
-    return (stream.getVideoTracks()[0] as TorchCapableTrack | undefined) ?? null;
+    return (
+      (stream.getVideoTracks()[0] as TorchCapableTrack | undefined) ?? null
+    );
   }
 
   function supportsTorchControl(track: TorchCapableTrack | null) {
-    if (!track || typeof track.getCapabilities !== 'function') {
+    if (!track || typeof track.getCapabilities !== "function") {
       return false;
     }
 
-    const supportedConstraints = navigator.mediaDevices?.getSupportedConstraints?.() as
-      | (MediaTrackSupportedConstraints & TorchSettings)
-      | undefined;
+    const supportedConstraints =
+      navigator.mediaDevices?.getSupportedConstraints?.() as
+        | (MediaTrackSupportedConstraints & TorchSettings)
+        | undefined;
     if (!supportedConstraints?.torch) {
       return false;
     }
 
-    const capabilities = track.getCapabilities() as MediaTrackCapabilities & TorchSettings;
+    const capabilities = track.getCapabilities() as MediaTrackCapabilities &
+      TorchSettings;
     return Boolean(capabilities?.torch);
   }
 
@@ -680,19 +436,21 @@ export default function App() {
 
     try {
       await track.applyConstraints({
-        advanced: [{ torch: nextTorchState } as MediaTrackConstraintSet & TorchSettings],
+        advanced: [
+          { torch: nextTorchState } as MediaTrackConstraintSet & TorchSettings,
+        ],
       } as MediaTrackConstraints);
       setIsTorchEnabled(nextTorchState);
       setCameraError(null);
     } catch {
-      setCameraError('No se pudo cambiar el flash de la cámara.');
+      setCameraError("No se pudo cambiar el flash de la cámara.");
     } finally {
       setIsTogglingTorch(false);
     }
   }
 
   async function applyRecognizeResponse(response: RecognizeResponse) {
-    if (response.status === 'ok' && response.serial) {
+    if (response.status === "ok" && response.serial) {
       const nextResult = toSerialResult(
         response.serial,
         response.confidence ?? response.candidates[0]?.confidence ?? 0.5,
@@ -700,13 +458,13 @@ export default function App() {
         response.series,
       );
       setResults(nextResult ? [nextResult] : []);
-      setScanFeedback('none');
+      setScanFeedback("none");
       setCameraError(null);
       return;
     }
 
     setResults([]);
-    setScanFeedback('not-found');
+    setScanFeedback("not-found");
     setCameraError(null);
   }
 
@@ -727,7 +485,7 @@ export default function App() {
       await applyRecognizeResponse(response);
     } catch (error) {
       setResults(null);
-      setScanFeedback('none');
+      setScanFeedback("none");
       setCameraError(errorMessageForScan(error));
     } finally {
       setScanProgress(null);
@@ -748,7 +506,7 @@ export default function App() {
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError('Tu navegador no permite abrir la cámara.');
+      setCameraError("Tu navegador no permite abrir la cámara.");
       return;
     }
 
@@ -758,7 +516,7 @@ export default function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: 'environment' },
+          facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
@@ -770,7 +528,9 @@ export default function App() {
       setIsTorchEnabled(false);
       syncTorchAvailability();
     } catch {
-      setCameraError('No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.');
+      setCameraError(
+        "No se pudo abrir la cámara. Revisa los permisos e inténtalo de nuevo.",
+      );
     } finally {
       setIsStartingCamera(false);
     }
@@ -783,19 +543,24 @@ export default function App() {
 
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) {
-      setCameraError('La cámara todavía se está preparando. Intenta de nuevo en un segundo.');
+      setCameraError(
+        "La cámara todavía se está preparando. Intenta de nuevo en un segundo.",
+      );
       return;
     }
 
     const guideRect = getCaptureGuideRect(video.videoWidth, video.videoHeight);
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = guideRect.width;
     canvas.height = guideRect.height;
-    const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    const context = canvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true,
+    });
 
     if (!context) {
       releaseCanvas(canvas);
-      setCameraError('No se pudo preparar la captura. Intenta de nuevo.');
+      setCameraError("No se pudo preparar la captura. Intenta de nuevo.");
       return;
     }
 
@@ -814,14 +579,18 @@ export default function App() {
     try {
       const previewBlob = await canvasToBlob(canvas);
       if (!previewBlob) {
-        throw new Error('No se pudo generar la captura.');
+        throw new Error("No se pudo generar la captura.");
       }
 
       stopCamera();
       clearScanOutput();
       setPreviewFromBlob(previewBlob);
       setCameraError(null);
-      await processDirectBlob(previewBlob, 'Analizando imagen...', 'captura guiada');
+      await processDirectBlob(
+        previewBlob,
+        "Analizando imagen...",
+        "captura guiada",
+      );
     } catch (error) {
       setCameraError(errorMessageForScan(error));
     } finally {
@@ -829,111 +598,12 @@ export default function App() {
     }
   }
 
-  async function processUploadedImage(file: File) {
-    if (isBusy) {
-      return;
-    }
-
-    if (typeof createImageBitmap !== 'function') {
-      setCameraError('Este navegador no soporta el procesamiento necesario.');
-      return;
-    }
-
-    stopCamera();
-    clearScanOutput();
-    setCameraError(null);
-    setIsProcessing(true);
-
-    let sourceBitmap: ImageBitmap | null = null;
-
-    try {
-      sourceBitmap = await createImageBitmap(file);
-      const isStripLike =
-        sourceBitmap.height <= 128 || sourceBitmap.width / Math.max(sourceBitmap.height, 1) >= 2.5;
-
-      if (isStripLike) {
-        setPreviewFromBlob(file);
-        const response = await runRemoteScan(file, 'Analizando imagen...', 'imagen completa');
-        await applyRecognizeResponse(response);
-        return;
-      }
-
-      const foregroundBounds = estimateForegroundBounds(sourceBitmap);
-      const uploadCandidates = getUploadCropCandidates(
-        sourceBitmap.width,
-        sourceBitmap.height,
-        foregroundBounds ?? undefined,
-      );
-      const orderedCandidateIds = [
-        'foreground-bounds',
-        'top-right-band',
-        'bottom-left-band',
-        'center-guide',
-      ];
-      const orderedCandidates = orderedCandidateIds
-        .map((candidateId) => uploadCandidates.find((candidate) => candidate.id === candidateId))
-        .filter((candidate): candidate is UploadCropCandidate => Boolean(candidate));
-
-      let bestMatch: RecognizeResponse | null = null;
-
-      for (let index = 0; index < orderedCandidates.length; index += 1) {
-        const candidate = orderedCandidates[index];
-        const croppedBlob = await createCroppedBlob(sourceBitmap, candidate.rect);
-        setPreviewFromBlob(croppedBlob);
-
-        const response = await runRemoteScan(
-          croppedBlob,
-          'Analizando imagen...',
-          `${candidate.label} (${index + 1}/${orderedCandidates.length})`,
-        );
-
-        if (response.status === 'ok' && response.serial) {
-          bestMatch = bestResponse(bestMatch, response);
-          if ((response.confidence ?? 0) >= ACCEPTED_CONFIDENCE_THRESHOLD) {
-            break;
-          }
-        }
-      }
-
-      if (bestMatch) {
-        await applyRecognizeResponse(bestMatch);
-      } else {
-        await applyRecognizeResponse({
-          status: 'not_found',
-          serial: null,
-          series: null,
-          raw_text: '',
-          confidence: null,
-          candidates: [],
-          engine: 'remote',
-          latency_ms: 0,
-          request_id: 'local-fallback',
-        });
-      }
-    } catch (error) {
-      setResults(null);
-      setScanFeedback('none');
-      setCameraError(errorMessageForScan(error));
-    } finally {
-      sourceBitmap?.close();
-      setScanProgress(null);
-      setIsProcessing(false);
-    }
-  }
-
-  function handleImageFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const [file] = event.target.files ?? [];
-    event.currentTarget.value = '';
-
-    if (!file) {
-      return;
-    }
-
-    void processUploadedImage(file);
-  }
-
-  function handleManualSerialChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const sanitizedValue = event.target.value.replace(/[^0-9]/g, '').slice(0, 9);
+  function handleManualSerialChange(
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const sanitizedValue = event.target.value
+      .replace(/[^0-9]/g, "")
+      .slice(0, 9);
     setManualSerialInput(sanitizedValue);
     if (manualInputError) {
       setManualInputError(null);
@@ -947,22 +617,64 @@ export default function App() {
 
     const normalizedSerial = manualSerialInput.trim();
     if (normalizedSerial.length < 8 || normalizedSerial.length > 9) {
-      setManualInputError('Ingresa un número de serie de 8 a 9 dígitos.');
+      setManualInputError("Ingresa un número de serie de 8 a 9 dígitos.");
       return;
     }
 
-    const manualResult = toSerialResult(normalizedSerial, 1, selectedDenomination);
+    const manualResult = toSerialResult(
+      normalizedSerial,
+      1,
+      selectedDenomination,
+    );
     if (!manualResult) {
-      setManualInputError('No se pudo interpretar el número de serie ingresado.');
+      setManualInputError(
+        "No se pudo interpretar el número de serie ingresado.",
+      );
       return;
     }
 
     stopCamera();
-    clearScanOutput();
-    setCameraError(null);
-    revokePreviewUrl();
-    setImageSrc(null);
+    resetFlowState();
     setResults([manualResult]);
+  }
+
+  function switchMethod(next: ActiveMethod) {
+    if (isBusy || next === activeMethod) {
+      return;
+    }
+
+    if (next !== "camera") {
+      stopCamera();
+    }
+
+    resetFlowState();
+    setActiveMethod(next);
+  }
+
+  function resetCameraFlow() {
+    if (isBusy) {
+      return;
+    }
+
+    resetFlowState();
+    if (activeMethod !== "camera") {
+      setActiveMethod("camera");
+    }
+    void startCamera();
+  }
+
+  function resetManualFlow() {
+    if (isBusy) {
+      return;
+    }
+
+    stopCamera();
+    resetFlowState();
+    setManualSerialInput("");
+    if (activeMethod !== "manual") {
+      setActiveMethod("manual");
+    }
+    window.requestAnimationFrame(() => manualInputRef.current?.focus());
   }
 
   useEffect(() => {
@@ -978,20 +690,35 @@ export default function App() {
     void video.play().catch(() => undefined);
   }, [isCameraActive]);
 
-  useEffect(() => () => {
-    stopCamera();
-    revokePreviewUrl();
-  }, []);
+  useEffect(() => {
+    if (activeMethod !== "manual") {
+      return;
+    }
+
+    const focusFrameId = window.requestAnimationFrame(() => {
+      manualInputRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(focusFrameId);
+  }, [activeMethod]);
+
+  useEffect(
+    () => () => {
+      stopCamera();
+      revokePreviewUrl();
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (isProcessing || (results === null && scanFeedback === 'none')) {
+    if (isProcessing || (results === null && scanFeedback === "none")) {
       return;
     }
 
     void waitForNextPaint(2).then(() => {
       window.scrollTo({
         top: document.documentElement.scrollHeight,
-        behavior: 'smooth',
+        behavior: "smooth",
       });
     });
   }, [isProcessing, results, scanFeedback]);
@@ -1004,259 +731,375 @@ export default function App() {
 
       return current.map((result) => ({
         ...result,
-        isValid: !isReportedAsInvalid(result.serialNumeric, selectedDenomination),
+        isValid: !isReportedAsInvalid(
+          result.serialNumeric,
+          selectedDenomination,
+        ),
       }));
     });
   }, [selectedDenomination]);
 
   return (
     <div className="container">
+      <header className="app-header">
+        <h1>Verificador de Billetes</h1>
+      </header>
+
       <main className="content">
-        <section className="camera-card">
-          <div className="camera-copy">
-            <h2>Coloca el número de serie dentro del recuadro</h2>
-            <p>
-              Selecciona primero la denominación para validar el 
-              número contra los rangos reportados por el BCB.
-            </p>
+        {/* ── Global denomination card – always visible ── */}
+        <section
+          className="denomination-global-card"
+          role="group"
+          aria-label="Seleccionar denominación"
+        >
+          <div className="denomination-copy">
+            <span className="denomination-label">Denominación</span>
           </div>
-
-          <div className="denomination-selector" role="group" aria-label="Seleccionar denominación">
-            <div className="denomination-copy">
-              <span className="denomination-label">Denominación</span>
-              <small>Valor activo: Bs {selectedDenomination}</small>
-            </div>
-            <div className="denomination-options">
-              {BILL_DENOMINATIONS.map((denomination) => (
-                <button
-                  key={denomination}
-                  type="button"
-                  className={`denomination-chip ${selectedDenomination === denomination ? 'active' : ''}`}
-                  aria-pressed={selectedDenomination === denomination}
-                  onClick={() => setSelectedDenomination(denomination)}
-                >
-                  Bs {denomination}
-                </button>
-              ))}
-            </div>
+          <div className="denomination-options">
+            {BILL_DENOMINATIONS.map((denomination) => (
+              <button
+                key={denomination}
+                type="button"
+                className={`denomination-chip ${selectedDenomination === denomination ? 'active' : ''}`}
+                aria-pressed={selectedDenomination === denomination}
+                onClick={() => setSelectedDenomination(denomination)}
+              >
+                Bs {denomination}
+              </button>
+            ))}
           </div>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={handleImageFileChange}
-          />
-
-          <div className="camera-launch-row">
-            <button
-              type="button"
-              className="primary-btn"
-              disabled={isBusy}
-              onClick={() => {
-                if (isCameraActive) {
-                  void captureCameraFrame();
-                } else {
-                  void startCamera();
-                }
-              }}
-            >
-              <Camera size={20} />
-              <span>
-                {isCameraActive
-                  ? 'Tomar foto del serial'
-                  : isStartingCamera
-                    ? 'Abriendo cámara...'
-                    : 'Abrir cámara'}
-              </span>
-            </button>
-          </div>
-
-          {isCameraActive && (
-            <div className="camera-stage-shell">
-              <div className="camera-stage">
-                <video ref={videoRef} className="camera-video" autoPlay muted playsInline />
-                <div className="camera-guide" />
-                <div className="camera-guide-label">Alinea el número de serie aquí</div>
-              </div>
-            </div>
-          )}
-
-          {cameraError && <p className="camera-error">{cameraError}</p>}
-
-          {(SHOW_UPLOAD_ACTION || isCameraActive) && (
-            <div className="camera-actions">
-              {SHOW_UPLOAD_ACTION && (
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  disabled={isBusy}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <ImageUp size={20} />
-                  <span>Probar con imagen</span>
-                </button>
-              )}
-
-              {isCameraActive && isTorchAvailable && (
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  disabled={isBusy}
-                  onClick={() => void toggleTorch()}
-                >
-                  {isTogglingTorch
-                    ? 'Cambiando flash...'
-                    : isTorchEnabled
-                      ? 'Apagar flash'
-                      : 'Encender flash'}
-                </button>
-              )}
-
-              {isCameraActive && (
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  disabled={isBusy}
-                  onClick={stopCamera}
-                >
-                  Cerrar cámara
-                </button>
-              )}
-            </div>
-          )}
-
-          {(imageSrc || (!isProcessing && results !== null)) && (
-            <div className="scan-output-stack">
-              {imageSrc && (
-                <div className="preview-card">
-                  <img
-                    key={imageSrc}
-                    src={imageSrc}
-                    alt="Billete escaneado"
-                    className="scanned-image"
-                  />
-
-                  {isProcessing && !isCameraActive && (
-                    <div className="processing-overlay">
-                      <Loader2 className="spinner" size={48} />
-                      <span>Analizando imagen...</span>
-                      <LoadingProgressBar progress={scanProgress} />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {!isProcessing && results !== null && results.length > 0 && (
-                <div className="results-container">
-                  {results.map((result) => (
-                    <div
-                      key={`${result.serialDisplay}-${result.confidence}`}
-                      className={`result-card ${result.isValid ? 'valid' : 'invalid'}`}
-                    >
-                      {result.isValid ? (
-                        <>
-                          <CheckCircle2 size={48} className="icon-valid" />
-                          <h2>Billete de Bs {selectedDenomination} Válido</h2>
-                          <p className="serial-code">{result.serialDisplay}</p>
-                          {shouldShowSeriesWarning(result.series) && (
-                            <p className="series-warning-chip">
-                              El billete parece no ser de la serie B
-                            </p>
-                          )}
-                          <p>
-                            No pertenece a los rangos reportados por el
-                            BCB para billetes de Bs {selectedDenomination}.
-                          </p>
-                        </>
-                      ) : (
-                        <>
-                          <XCircle size={48} className="icon-invalid" />
-                          <h2>Billete de Bs {selectedDenomination} Inválido</h2>
-                          <p className="serial-code">{result.serialDisplay}</p>
-                          {shouldShowSeriesWarning(result.series) && (
-                            <p className="series-warning-chip">
-                              El billete parece no ser de la serie B
-                            </p>
-                          )}
-                          <p>
-                            ¡Cuidado! Pertenece a un lote reportado
-                            robado por el BCB para billetes de Bs {selectedDenomination}.
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {!isProcessing &&
-                results !== null &&
-                results.length === 0 &&
-                scanFeedback === 'not-found' && (
-                  <div className="result-card invalid">
-                    <XCircle size={48} className="icon-invalid" />
-                    <h2>Patrón no encontrado</h2>
-                    <p>No se detectó un número de serie de 8 a 9 dígitos en la imagen enviada.</p>
-                  </div>
-                )}
-            </div>
-          )}
         </section>
 
-        <section className="manual-entry-section" aria-labelledby="manual-entry-heading">
-          <div className="manual-entry-divider" aria-hidden="true" />
-
-          <form
-            className="manual-entry"
-            onSubmit={(event) => {
-              event.preventDefault();
-              handleManualSubmit();
-            }}
-          >
-            <div className="manual-entry-copy">
-              <span id="manual-entry-heading" className="denomination-label">
-                Entrada manual
-              </span>
-              <small>Escribe el número de serie si no quieres usar la cámara.</small>
-            </div>
-
-            <div className="manual-entry-field">
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="off"
-                className="manual-entry-input"
-                value={manualSerialInput}
-                onChange={handleManualSerialChange}
-                placeholder="Ej. 12345678"
-                aria-label="Número de serie manual"
-                aria-invalid={manualInputError ? 'true' : 'false'}
-              />
-
+        {/* ── Method selector (initial state) ── */}
+        {activeMethod === 'none' && (
+          <section className="method-choice-section">
+            <p className="method-choice-label">Selecciona un modo</p>
+            <div className="method-choice-row">
               <button
-                type="submit"
-                className="secondary-btn"
-                disabled={isBusy || manualSerialInput.length === 0}
+                type="button"
+                className="method-card"
+                onClick={() => switchMethod('camera')}
               >
-                Validar manualmente
+                <Camera size={32} className="method-card-icon" />
+                <strong>Usar Cámara</strong>
+              </button>
+              <button
+                type="button"
+                className="method-card"
+                onClick={() => switchMethod('manual')}
+              >
+                <Keyboard size={32} className="method-card-icon" />
+                <strong>Entrada Manual</strong>
               </button>
             </div>
+          </section>
+        )}
 
-            {manualInputError ? (
-              <p className="manual-entry-error">{manualInputError}</p>
+        {/* ── Camera flow ── */}
+        {activeMethod === 'camera' && (
+          <section className="camera-container">
+            <div className="section-header">
+              <span className="section-title">Cámara</span>
+              <div className="section-links">
+                <button
+                  type="button"
+                  className="mode-switch-btn"
+                  disabled={isBusy}
+                  onClick={resetManualFlow}
+                >
+                  Manual
+                </button>
+              </div>
+            </div>
+
+            {/* Scan result / error display */}
+            {(imageSrc || (!isProcessing && results !== null)) ? (
+              <div className="scan-output-stack">
+                {imageSrc && (
+                  <div className="preview-card">
+                    <img
+                      key={imageSrc}
+                      src={imageSrc}
+                      alt="Billete escaneado"
+                      className="scanned-image"
+                    />
+                    {isProcessing && (
+                      <div className="processing-overlay">
+                        <Loader2 className="spinner" size={48} />
+                        <span>Analizando imagen...</span>
+                        <LoadingProgressBar progress={scanProgress} />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!isProcessing && cameraError && results === null && (
+                  <div className="error-container">
+                    <XCircle size={40} className="icon-invalid" />
+                    <h2>No se pudo analizar la captura</h2>
+                    <p>{cameraError}</p>
+                    <div className="flow-inline-actions">
+                      <button
+                        type="button"
+                        className="primary-btn"
+                        onClick={resetCameraFlow}
+                      >
+                        <Camera size={18} />
+                        <span>Reintentar con cámara</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={resetManualFlow}
+                      >
+                        <Keyboard size={18} />
+                        <span>Ingresar manualmente</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {!isProcessing && results !== null && results.length > 0 && (
+                  <div className="results-container">
+                    {results.map((result) => (
+                      <SerialResultCard
+                        key={`${result.serialDisplay}-${result.confidence}`}
+                        result={result}
+                        denomination={selectedDenomination}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Not-found error with recovery actions */}
+                {!isProcessing &&
+                  results !== null &&
+                  results.length === 0 &&
+                  scanFeedback === 'not-found' && (
+                    <div className="error-container">
+                      <XCircle size={40} className="icon-invalid" />
+                      <h2>Patrón no encontrado</h2>
+                      <p>
+                        No se detectó un número de serie de 8 a 9 dígitos en
+                        la imagen enviada.
+                      </p>
+                      <button
+                        type="button"
+                        className="primary-btn error-retry-btn"
+                        onClick={resetCameraFlow}
+                      >
+                        <Camera size={18} />
+                        <span>Reintentar con cámara</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={resetManualFlow}
+                      >
+                        <Keyboard size={18} />
+                        <span>Entrada manual</span>
+                      </button>
+                    </div>
+                  )}
+
+                {!isProcessing && results !== null && results.length > 0 && (
+                  <div className="flow-inline-actions">
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={resetCameraFlow}
+                    >
+                      <Camera size={18} />
+                      <span>Escanear otra vez</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={resetManualFlow}
+                    >
+                      <Keyboard size={18} />
+                      <span>Cambiar a manual</span>
+                    </button>
+                  </div>
+                  )}
+
+              </div>
             ) : (
-              <small className="manual-entry-hint">
-                Se validará contra los rangos reportados para Bs {selectedDenomination}.
-              </small>
+              /* Camera viewport */
+              <>
+                <div className="camera-launch-row">
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    disabled={isBusy}
+                    onClick={() => {
+                      if (isCameraActive) {
+                        void captureCameraFrame();
+                      } else {
+                        void startCamera();
+                      }
+                    }}
+                  >
+                    <Camera size={20} />
+                    <span>
+                      {isCameraActive
+                        ? 'Tomar foto del serial'
+                        : isStartingCamera
+                          ? 'Abriendo cámara...'
+                          : 'Abrir cámara'}
+                    </span>
+                  </button>
+                </div>
+
+                {isCameraActive && (
+                  <div className="camera-stage-shell">
+                    <div className="camera-stage">
+                      <video
+                        ref={videoRef}
+                        className="camera-video"
+                        autoPlay
+                        muted
+                        playsInline
+                      />
+                      <div className="camera-guide" />
+                      <div className="camera-guide-label">
+                        Alinea el número de serie aquí
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {cameraError && <p className="camera-error">{cameraError}</p>}
+
+                <div className="camera-actions">
+                  {isCameraActive && isTorchAvailable && (
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      disabled={isBusy}
+                      onClick={() => void toggleTorch()}
+                    >
+                      {isTogglingTorch
+                        ? 'Cambiando flash...'
+                        : isTorchEnabled
+                          ? 'Apagar flash'
+                          : 'Encender flash'}
+                    </button>
+                  )}
+
+                  {isCameraActive && (
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      disabled={isBusy}
+                      onClick={stopCamera}
+                    >
+                      Cerrar cámara
+                    </button>
+                  )}
+                </div>
+
+              </>
             )}
-          </form>
-        </section>
+          </section>
+        )}
+
+        {/* ── Manual entry flow ── */}
+        {activeMethod === 'manual' && (
+          <section className="manual-method-card" aria-labelledby="manual-entry-heading">
+            <div className="section-header">
+              <span id="manual-entry-heading" className="section-title">
+                Manual
+              </span>
+              <div className="section-links">
+                <button
+                  type="button"
+                  className="mode-switch-btn"
+                  disabled={isBusy}
+                  onClick={resetCameraFlow}
+                >
+                  Cámara
+                </button>
+              </div>
+            </div>
+
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                handleManualSubmit();
+              }}
+            >
+              <div className="manual-entry-field">
+                <input
+                  ref={manualInputRef}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  className="manual-entry-input"
+                  value={manualSerialInput}
+                  onChange={handleManualSerialChange}
+                  placeholder="Ej. 12345678"
+                  aria-label="Número de serie manual"
+                  aria-invalid={manualInputError ? 'true' : 'false'}
+                />
+                <button
+                  type="submit"
+                  className="primary-btn manual-submit-btn"
+                  disabled={isBusy || manualSerialInput.length === 0}
+                >
+                  Revisar
+                </button>
+              </div>
+
+              {manualInputError ? (
+                <p className="manual-entry-error">{manualInputError}</p>
+              ) : (
+                <small className="manual-entry-hint">8 a 9 dígitos</small>
+              )}
+            </form>
+
+            {/* Results (manual) */}
+            {!isProcessing && results !== null && results.length > 0 && (
+              <div className="results-container manual-results">
+                {results.map((result) => (
+                  <SerialResultCard
+                    key={`${result.serialDisplay}-${result.confidence}`}
+                    result={result}
+                    denomination={selectedDenomination}
+                  />
+                ))}
+              </div>
+            )}
+
+            {results !== null && (
+              <div className="section-links section-links-centered">
+                <button
+                  type="button"
+                  className="flow-text-link"
+                  onClick={resetManualFlow}
+                >
+                  Otro serial
+                </button>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Processing spinner when no image preview (manual path) */}
+        {isProcessing && !imageSrc && (
+          <div className="status-box">
+            <Loader2 className="spinner" size={32} />
+            <LoadingProgressBar progress={scanProgress} />
+          </div>
+        )}
       </main>
 
       <footer className="footer-copyright">
-        <a href="https://github.com/nubol23" target="_blank" rel="noopener noreferrer">
+        <a
+          href="https://github.com/nubol23"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           © {new Date().getFullYear()} nubol23
         </a>
       </footer>
