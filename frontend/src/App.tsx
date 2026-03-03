@@ -15,6 +15,7 @@ import {
 
 const CAMERA_FRAME_WIDTH_RATIO = 0.78;
 const CAMERA_FRAME_HEIGHT_RATIO = 0.18;
+const CAMERA_PREVIEW_ASPECT_RATIO = 16 / 9;
 const DERIVATIVE_JPEG_QUALITY = 0.92;
 
 type BillDenomination = "10" | "20" | "50";
@@ -208,16 +209,54 @@ function waitForNextPaint(frames = 1) {
   });
 }
 
-function getCaptureGuideRect(width: number, height: number) {
-  const guideWidth = Math.max(1, Math.round(width * CAMERA_FRAME_WIDTH_RATIO));
-  const guideHeight = Math.max(
+function getPreviewViewportRect(width: number, height: number) {
+  const sourceAspectRatio = width / Math.max(height, 1);
+
+  if (Math.abs(sourceAspectRatio - CAMERA_PREVIEW_ASPECT_RATIO) < 0.01) {
+    return { x: 0, y: 0, width, height };
+  }
+
+  if (sourceAspectRatio > CAMERA_PREVIEW_ASPECT_RATIO) {
+    const viewportWidth = Math.max(
+      1,
+      Math.round(height * CAMERA_PREVIEW_ASPECT_RATIO),
+    );
+
+    return {
+      x: Math.max(0, Math.round((width - viewportWidth) / 2)),
+      y: 0,
+      width: viewportWidth,
+      height,
+    };
+  }
+
+  const viewportHeight = Math.max(
     1,
-    Math.round(height * CAMERA_FRAME_HEIGHT_RATIO),
+    Math.round(width / CAMERA_PREVIEW_ASPECT_RATIO),
   );
 
   return {
-    x: Math.max(0, Math.round((width - guideWidth) / 2)),
-    y: Math.max(0, Math.round((height - guideHeight) / 2)),
+    x: 0,
+    y: Math.max(0, Math.round((height - viewportHeight) / 2)),
+    width,
+    height: viewportHeight,
+  };
+}
+
+function getCaptureGuideRect(width: number, height: number) {
+  const previewViewport = getPreviewViewportRect(width, height);
+  const guideWidth = Math.max(
+    1,
+    Math.round(previewViewport.width * CAMERA_FRAME_WIDTH_RATIO),
+  );
+  const guideHeight = Math.max(
+    1,
+    Math.round(previewViewport.height * CAMERA_FRAME_HEIGHT_RATIO),
+  );
+
+  return {
+    x: previewViewport.x + Math.max(0, Math.round((previewViewport.width - guideWidth) / 2)),
+    y: previewViewport.y + Math.max(0, Math.round((previewViewport.height - guideHeight) / 2)),
     width: guideWidth,
     height: guideHeight,
   };

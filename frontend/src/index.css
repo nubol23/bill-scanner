@@ -782,13 +782,9 @@ body {
   position: relative;
   width: 100%;
   max-width: 30rem;
-  height: min(68svh, 32rem);
-  min-height: min(24rem, 68svh);
+  aspect-ratio: 16 / 9;
   border-radius: 0.85rem;
   overflow: hidden;
-}
-
-.camera-stage {
   background: #111827;
 }
 
@@ -797,6 +793,7 @@ body {
   height: 100%;
   display: block;
   object-fit: cover;
+  object-position: center;
 }
 
 .camera-guide {
@@ -1061,8 +1058,6 @@ body {
 
   .camera-stage {
     max-width: none;
-    height: min(62svh, 27rem);
-    min-height: min(20rem, 62svh);
   }
 
   .camera-guide {
@@ -1090,13 +1085,6 @@ body {
   .diagnostic-row-meta {
     align-items: flex-start;
     text-align: left;
-  }
-}
-
-@media (max-height: 740px) {
-  .camera-stage {
-    height: min(58svh, 24rem);
-    min-height: min(18rem, 58svh);
   }
 }
 
