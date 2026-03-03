@@ -1126,68 +1126,84 @@ export default function App() {
               )}
             </div>
           )}
-        </section>
 
-        {imageSrc && (
-          <div className="preview-card">
-            <img key={imageSrc} src={imageSrc} alt="Billete escaneado" className="scanned-image" />
+          {(imageSrc || (!isProcessing && results !== null)) && (
+            <div className="scan-output-stack">
+              {imageSrc && (
+                <div className="preview-card">
+                  <img
+                    key={imageSrc}
+                    src={imageSrc}
+                    alt="Billete escaneado"
+                    className="scanned-image"
+                  />
 
-            {isProcessing && !isCameraActive && (
-              <div className="processing-overlay">
-                <Loader2 className="spinner" size={48} />
-                <span>Analizando imagen...</span>
-                <LoadingProgressBar progress={scanProgress} />
-              </div>
-            )}
-          </div>
-        )}
+                  {isProcessing && !isCameraActive && (
+                    <div className="processing-overlay">
+                      <Loader2 className="spinner" size={48} />
+                      <span>Analizando imagen...</span>
+                      <LoadingProgressBar progress={scanProgress} />
+                    </div>
+                  )}
+                </div>
+              )}
 
-        {!isProcessing && results !== null && results.length > 0 && (
-          <div className="results-container">
-            {results.map((result) => (
-              <div
-                key={`${result.serialDisplay}-${result.confidence}`}
-                className={`result-card ${result.isValid ? 'valid' : 'invalid'}`}
-              >
-                {result.isValid ? (
-                  <>
-                    <CheckCircle2 size={48} className="icon-valid" />
-                    <h2>Billete de Bs {selectedDenomination} Válido</h2>
-                    <p className="serial-code">{result.serialDisplay}</p>
-                    {shouldShowSeriesWarning(result.series) && (
-                      <p className="series-warning-chip">El billete parece no ser de la serie B</p>
-                    )}
-                    <p>
-                      No pertenece a los rangos reportados por el
-                      BCB para billetes de Bs {selectedDenomination}.
-                    </p>
-                  </>
-                ) : (
-                  <>
+              {!isProcessing && results !== null && results.length > 0 && (
+                <div className="results-container">
+                  {results.map((result) => (
+                    <div
+                      key={`${result.serialDisplay}-${result.confidence}`}
+                      className={`result-card ${result.isValid ? 'valid' : 'invalid'}`}
+                    >
+                      {result.isValid ? (
+                        <>
+                          <CheckCircle2 size={48} className="icon-valid" />
+                          <h2>Billete de Bs {selectedDenomination} Válido</h2>
+                          <p className="serial-code">{result.serialDisplay}</p>
+                          {shouldShowSeriesWarning(result.series) && (
+                            <p className="series-warning-chip">
+                              El billete parece no ser de la serie B
+                            </p>
+                          )}
+                          <p>
+                            No pertenece a los rangos reportados por el
+                            BCB para billetes de Bs {selectedDenomination}.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <XCircle size={48} className="icon-invalid" />
+                          <h2>Billete de Bs {selectedDenomination} Inválido</h2>
+                          <p className="serial-code">{result.serialDisplay}</p>
+                          {shouldShowSeriesWarning(result.series) && (
+                            <p className="series-warning-chip">
+                              El billete parece no ser de la serie B
+                            </p>
+                          )}
+                          <p>
+                            ¡Cuidado! Pertenece a un lote reportado
+                            robado por el BCB para billetes de Bs {selectedDenomination}.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!isProcessing &&
+                results !== null &&
+                results.length === 0 &&
+                scanFeedback === 'not-found' && (
+                  <div className="result-card invalid">
                     <XCircle size={48} className="icon-invalid" />
-                    <h2>Billete de Bs {selectedDenomination} Inválido</h2>
-                    <p className="serial-code">{result.serialDisplay}</p>
-                    {shouldShowSeriesWarning(result.series) && (
-                      <p className="series-warning-chip">El billete parece no ser de la serie B</p>
-                    )}
-                    <p>
-                      ¡Cuidado! Pertenece a un lote reportado
-                      robado por el BCB para billetes de Bs {selectedDenomination}.
-                    </p>
-                  </>
+                    <h2>Patrón no encontrado</h2>
+                    <p>No se detectó un número de serie de 8 a 9 dígitos en la imagen enviada.</p>
+                  </div>
                 )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {!isProcessing && results !== null && results.length === 0 && scanFeedback === 'not-found' && (
-          <div className="result-card invalid">
-            <XCircle size={48} className="icon-invalid" />
-            <h2>Patrón no encontrado</h2>
-            <p>No se detectó un número de serie de 8 a 9 dígitos en la imagen enviada.</p>
-          </div>
-        )}
+            </div>
+          )}
+        </section>
 
         <section className="manual-entry-section" aria-labelledby="manual-entry-heading">
           <div className="manual-entry-divider" aria-hidden="true" />
